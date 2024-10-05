@@ -227,7 +227,7 @@ app.get('/article/:id', authenticateToken, async (req, res) => {
 
 app.post('/create-checkout-session', authenticateToken, async (req, res) => {
   try {
-    const { priceId } = req.body;
+    const { plan } = req.body;
     const user = await User.findById(req.user._id);
 
     if (!user.stripeCustomerId) {
@@ -236,6 +236,21 @@ app.post('/create-checkout-session', authenticateToken, async (req, res) => {
       });
       user.stripeCustomerId = customer.id;
       await user.save();
+    }
+
+    let priceId;
+    switch (plan) {
+      case 'basic':
+        priceId = process.env.STRIPE_PRICE_ID_BASIC;
+        break;
+      case 'pro':
+        priceId = process.env.STRIPE_PRICE_ID_PRO;
+        break;
+      case 'enterprise':
+        priceId = process.env.STRIPE_PRICE_ID_ENTERPRISE;
+        break;
+      default:
+        return res.status(400).json({ error: 'Invalid plan' });
     }
 
     const session = await stripe.checkout.sessions.create({
@@ -250,6 +265,7 @@ app.post('/create-checkout-session', authenticateToken, async (req, res) => {
       success_url: `${process.env.EXTENSION_SUCCESS_URL}?session_id={CHECKOUT_SESSION_ID}`,
       cancel_url: `${process.env.EXTENSION_CANCEL_URL}`,
       customer: user.stripeCustomerId,
+      client_reference_id: user._id.toString(),
     });
 
     res.json({ sessionId: session.id });
@@ -289,6 +305,7 @@ app.post('/create-token-purchase', authenticateToken, async (req, res) => {
       success_url: `${process.env.EXTENSION_SUCCESS_URL}?session_id={CHECKOUT_SESSION_ID}`,
       cancel_url: `${process.env.EXTENSION_CANCEL_URL}`,
       customer: user.stripeCustomerId,
+      client_reference_id: user._id.toString(),
     });
 
     res.json({ sessionId: session.id });
@@ -339,7 +356,7 @@ app.post('/webhook', express.raw({type: 'application/json'}), async (req, res) =
 
 async function handleSubscriptionPurchase(session) {
   const userId = session.client_reference_id;
-  const user = await User.findOne({ stripeCustomerId: session.customer });
+  const user = await User.findById(userId);
   if (!user) return;
 
   const subscription = await stripe.subscriptions.retrieve(session.subscription);
@@ -366,7 +383,8 @@ async function handleSubscriptionPurchase(session) {
 }
 
 async function handleTokenPurchase(session) {
-  const user = await User.findOne({ stripeCustomerId: session.customer });
+  const userId = session.client_reference_id;
+  const user = await User.findById(userId);
   if (!user) return;
 
   const tokensToAdd = Math.floor(session.amount_total / 20); // 20 centimes par jeton
@@ -383,6 +401,24 @@ async function handleCancelledSubscription(subscription) {
   user.subscriptionEndDate = new Date();
   await user.save();
 }
+
+app.post('/change-password', authenticateToken, async (req, res) => {
+  try {
+    const { currentPassword, newPassword } = req.body;
+    const user = await User.findById(req.user._id);
+
+    if (!(await user.comparePassword(currentPassword))) {
+      return res.status(400).json({ error: 'Current password is incorrect' });
+    }
+
+    user.password = newPassword;
+    await user.save();
+
+    res.json({ message: 'Password changed successfully' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
 
 app.use((err, req, res, next) => {
   console.error(err.stack);
