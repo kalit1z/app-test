@@ -3,15 +3,34 @@ const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 
 const userSchema = new mongoose.Schema({
-  email: { type: String, required: true, unique: true },
-  password: { type: String, required: true },
-  tokens: { type: Number, default: 0 },
-  stripeCustomerId: { type: String },
-  stripeSubscriptionId: { type: String },
-  stripePlanId: { type: String },
-  subscriptionStatus: { type: String, enum: ['active', 'canceled', 'none'], default: 'none' },
-  subscriptionEndDate: { type: Date }
-});
+  email: { 
+    type: String, 
+    required: true, 
+    unique: true 
+  },
+  password: { 
+    type: String, 
+    required: true 
+  },
+  tokens: { 
+    type: Number, 
+    default: 0 
+  },
+  stripeCustomerId: { 
+    type: String 
+  },
+  subscriptionStatus: { 
+    type: String, 
+    enum: ['active', 'inactive', 'cancelled'], 
+    default: 'inactive' 
+  },
+  subscriptionPlan: { 
+    type: String 
+  },
+  subscriptionEndDate: { 
+    type: Date 
+  }
+}, { timestamps: true });
 
 userSchema.pre('save', async function(next) {
   if (this.isModified('password')) {
@@ -33,11 +52,6 @@ userSchema.methods.addTokens = async function(amount) {
   await this.save();
 };
 
-userSchema.methods.resetTokens = async function(amount) {
-  this.tokens = amount;
-  await this.save();
-};
-
 userSchema.methods.useToken = async function() {
   if (this.tokens > 0) {
     this.tokens -= 1;
@@ -52,21 +66,11 @@ userSchema.methods.setStripeCustomerId = async function(customerId) {
   await this.save();
 };
 
-userSchema.methods.setSubscription = async function(subscriptionId, planId, endDate) {
-  this.stripeSubscriptionId = subscriptionId;
-  this.stripePlanId = planId;
-  this.subscriptionStatus = 'active';
+userSchema.methods.updateSubscription = async function(status, plan, endDate) {
+  this.subscriptionStatus = status;
+  this.subscriptionPlan = plan;
   this.subscriptionEndDate = endDate;
   await this.save();
-};
-
-userSchema.methods.cancelSubscription = async function() {
-  this.subscriptionStatus = 'canceled';
-  await this.save();
-};
-
-userSchema.statics.findByEmail = function(email) {
-  return this.findOne({ email });
 };
 
 const User = mongoose.model('User', userSchema);
