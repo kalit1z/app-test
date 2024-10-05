@@ -225,9 +225,8 @@ app.get('/article/:id', authenticateToken, async (req, res) => {
   }
 });
 
-app.post('/create-checkout-session', authenticateToken, async (req, res) => {
+app.get('/stripe-payment-links', authenticateToken, async (req, res) => {
   try {
-    const { plan } = req.body;
     const user = await User.findById(req.user._id);
 
     if (!user.stripeCustomerId) {
@@ -238,39 +237,38 @@ app.post('/create-checkout-session', authenticateToken, async (req, res) => {
       await user.save();
     }
 
-    let priceId;
-    switch (plan) {
-      case 'basic':
-        priceId = process.env.STRIPE_PRICE_ID_BASIC;
-        break;
-      case 'pro':
-        priceId = process.env.STRIPE_PRICE_ID_PRO;
-        break;
-      case 'enterprise':
-        priceId = process.env.STRIPE_PRICE_ID_ENTERPRISE;
-        break;
-      default:
-        return res.status(400).json({ error: 'Invalid plan' });
-    }
-
-    const session = await stripe.checkout.sessions.create({
+    const basicSession = await stripe.checkout.sessions.create({
       payment_method_types: ['card'],
-      line_items: [
-        {
-          price: priceId,
-          quantity: 1,
-        },
-      ],
+      line_items: [{ price: process.env.STRIPE_PRICE_ID_BASIC, quantity: 1 }],
       mode: 'subscription',
-      success_url: `${process.env.EXTENSION_SUCCESS_URL}?session_id={CHECKOUT_SESSION_ID}`,
-      cancel_url: `${process.env.EXTENSION_CANCEL_URL}`,
       customer: user.stripeCustomerId,
       client_reference_id: user._id.toString(),
     });
 
-    res.json({ sessionId: session.id });
+    const proSession = await stripe.checkout.sessions.create({
+      payment_method_types: ['card'],
+      line_items: [{ price: process.env.STRIPE_PRICE_ID_PRO, quantity: 1 }],
+      mode: 'subscription',
+      customer: user.stripeCustomerId,
+      client_reference_id: user._id.toString(),
+    });
+
+    const enterpriseSession = await stripe.checkout.sessions.create({
+      payment_method_types: ['card'],
+      line_items: [{ price: process.env.STRIPE_PRICE_ID_ENTERPRISE, quantity: 1 }],
+      mode: 'subscription',
+      customer: user.stripeCustomerId,
+      client_reference_id: user._id.toString(),
+    });
+
+    res.json({
+      basic: basicSession.url,
+      pro: proSession.url,
+      enterprise: enterpriseSession.url
+    });
   } catch (error) {
-    res.status(400).json({ error: error.message });
+    console.error('Error creating Stripe sessions:', error);
+    res.status(500).json({ error: 'Error creating Stripe sessions' });
   }
 });
 
@@ -302,28 +300,13 @@ app.post('/create-token-purchase', authenticateToken, async (req, res) => {
         },
       ],
       mode: 'payment',
-      success_url: `${process.env.EXTENSION_SUCCESS_URL}?session_id={CHECKOUT_SESSION_ID}`,
-      cancel_url: `${process.env.EXTENSION_CANCEL_URL}`,
       customer: user.stripeCustomerId,
       client_reference_id: user._id.toString(),
     });
 
-    res.json({ sessionId: session.id });
+    res.json({ url: session.url });
   } catch (error) {
     res.status(400).json({ error: error.message });
-  }
-});
-
-app.get('/subscription-plans', async (req, res) => {
-  try {
-    const plans = [
-      { id: process.env.STRIPE_PRICE_ID_BASIC, name: 'Basic', tokens: 100, price: 2990 },
-      { id: process.env.STRIPE_PRICE_ID_PRO, name: 'Pro', tokens: 250, price: 5990 },
-      { id: process.env.STRIPE_PRICE_ID_ENTERPRISE, name: 'Enterprise', tokens: 500, price: 9990 },
-    ];
-    res.json(plans);
-  } catch (error) {
-    res.status(500).json({ error: error.message });
   }
 });
 
@@ -420,9 +403,23 @@ app.post('/change-password', authenticateToken, async (req, res) => {
   }
 });
 
+app.get('/subscription-plans', async (req, res) => {
+  try {
+    const plans = [
+      { id: process.env.STRIPE_PRICE_ID_BASIC, name: 'Basic', tokens: 100, price: 2990 },
+      { id: process.env.STRIPE_PRICE_ID_PRO, name: 'Pro', tokens: 250, price: 5990 },
+      { id: process.env.STRIPE_PRICE_ID_ENTERPRISE, name: 'Enterprise', tokens: 500, price: 9990 },
+    ];
+    res.json(plans);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Gestion globale des erreurs
 app.use((err, req, res, next) => {
   console.error(err.stack);
-  res.status(500).send('Something broke!');
+  res.status(500).json({ error: 'Something went wrong' });
 });
 
 const PORT = process.env.PORT || 3000;
