@@ -75,4 +75,4 @@ userSchema.methods.updateSubscription = async function(status, plan, endDate) {
 
 const User = mongoose.model('User', userSchema);
 
-module.exports = User;s
+module.exports = User;
