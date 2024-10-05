@@ -7,6 +7,7 @@ const jwt = require('jsonwebtoken');
 const { body, validationResult } = require('express-validator');
 const axios = require('axios');
 const puppeteer = require('puppeteer');
+const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 
 // Import des modèles
 const User = require('./models/User');
@@ -111,11 +112,26 @@ app.get('/user', authenticateToken, async (req, res) => {
   }
 });
 
+app.get('/user-profile', authenticateToken, async (req, res) => {
+  try {
+    const user = await User.findById(req.user._id).select('-password');
+    res.json({
+      email: user.email,
+      tokens: user.tokens,
+      subscriptionStatus: user.subscriptionStatus,
+      subscriptionPlan: user.subscriptionPlan,
+      subscriptionEndDate: user.subscriptionEndDate
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 app.post('/generate', authenticateToken, async (req, res) => {
   try {
     const user = await User.findById(req.user._id);
-    if (user.credits <= 0) {
-      return res.status(403).json({ error: 'Insufficient credits' });
+    if (user.tokens <= 0) {
+      return res.status(403).json({ error: 'Insufficient tokens' });
     }
 
     let h1, h2s, h3s, title, url;
@@ -179,7 +195,7 @@ app.post('/generate', authenticateToken, async (req, res) => {
     });
     await article.save();
 
-    user.credits -= 1;
+    user.tokens -= 1;
     await user.save();
 
     res.json({ content: generatedContent, filename: `${title || 'contenu_seo'}.md` });
@@ -213,6 +229,100 @@ app.get('/article/:id', authenticateToken, async (req, res) => {
     res.status(500).json({ error: 'Error fetching article' });
   }
 });
+
+// Nouvelle route pour créer une session de paiement Stripe
+app.post('/create-checkout-session', authenticateToken, async (req, res) => {
+  try {
+    const { priceId } = req.body;
+    const user = await User.findById(req.user._id);
+
+    const session = await stripe.checkout.sessions.create({
+      payment_method_types: ['card'],
+      line_items: [
+        {
+          price: priceId,
+          quantity: 1,
+        },
+      ],
+      mode: 'subscription',
+      success_url: `${process.env.FRONTEND_URL}/success?session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${process.env.FRONTEND_URL}/cancel`,
+      customer_email: user.email,
+      client_reference_id: user._id.toString(),
+    });
+
+    res.json({ sessionId: session.id });
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
+// Webhook pour gérer les événements Stripe
+app.post('/webhook', express.raw({type: 'application/json'}), async (req, res) => {
+  const sig = req.headers['stripe-signature'];
+  let event;
+
+  try {
+    event = stripe.webhooks.constructEvent(req.body, sig, process.env.STRIPE_WEBHOOK_SECRET);
+  } catch (err) {
+    return res.status(400).send(`Webhook Error: ${err.message}`);
+  }
+
+  // Gérer l'événement
+  switch (event.type) {
+    case 'checkout.session.completed':
+      const session = event.data.object;
+      await handleSuccessfulPayment(session);
+      break;
+    case 'customer.subscription.deleted':
+      const subscription = event.data.object;
+      await handleCancelledSubscription(subscription);
+      break;
+    // ... gérer d'autres événements si nécessaire
+  }
+
+  res.json({received: true});
+});
+
+async function handleSuccessfulPayment(session) {
+  const userId = session.client_reference_id;
+  const user = await User.findById(userId);
+  if (!user) return;
+
+  // Mettre à jour l'abonnement de l'utilisateur
+  user.subscriptionStatus = 'active';
+  user.subscriptionPlan = session.display_items[0].plan.nickname;
+  user.subscriptionEndDate = new Date(session.current_period_end * 1000);
+
+  // Ajouter des jetons en fonction du plan
+  switch (user.subscriptionPlan) {
+    case 'Basic':
+      user.tokens = 100;
+      break;
+    case 'Pro':
+      user.tokens = 250;
+      break;
+    case 'Enterprise':
+      user.tokens = 500;
+      break;
+    default:
+      // Gérer l'achat de jetons supplémentaires
+      const tokensToAdd = Math.floor(session.amount_total / 20); // 20 centimes par jeton
+      user.tokens += tokensToAdd;
+  }
+
+  await user.save();
+}
+
+async function handleCancelledSubscription(subscription) {
+  const user = await User.findOne({ stripeCustomerId: subscription.customer });
+  if (!user) return;
+
+  user.subscriptionStatus = 'cancelled';
+  user.subscriptionPlan = null;
+  user.subscriptionEndDate = new Date();
+  await user.save();
+}
 
 // Gestion des erreurs
 app.use((err, req, res, next) => {
