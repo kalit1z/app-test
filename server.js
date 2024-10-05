@@ -53,18 +53,24 @@ const authenticateToken = (req, res, next) => {
 
 // Fonction de scraping
 const scrapeSEOElements = async (url) => {
-  const browser = await puppeteer.launch();
+  const browser = await puppeteer.launch({
+    headless: true,
+    args: ['--no-sandbox', '--disable-setuid-sandbox']
+  });
   const page = await browser.newPage();
-  await page.goto(url);
+  await page.goto(url, { waitUntil: 'networkidle0' });
 
-  const h1 = await page.$eval('h1', el => el.innerText).catch(() => '');
-  const h2s = await page.$$eval('h2', els => els.map(el => el.innerText)).catch(() => []);
-  const h3s = await page.$$eval('h3', els => els.map(el => el.innerText)).catch(() => []);
-  const text = await page.evaluate(() => document.body.innerText);
-  const title = await page.title();
+  const result = await page.evaluate(() => {
+    const h1 = document.querySelector('h1')?.innerText || '';
+    const h2s = Array.from(document.querySelectorAll('h2')).map(el => el.innerText);
+    const h3s = Array.from(document.querySelectorAll('h3')).map(el => el.innerText);
+    const text = document.body.innerText;
+    const title = document.title;
+    return { h1, h2s, h3s, text, title };
+  });
 
   await browser.close();
-  return { h1, h2s, h3s, text, title };
+  return result;
 };
 
 // Routes
@@ -165,6 +171,7 @@ app.post('/generate', authenticateToken, async (req, res) => {
     8. Adopte un ton professionnel mais accessible, adapté à votre audience cible.
     9. Fait en sorte d'avoir du texte en quantité pour chaque paragraphe. Je n'ai pas envie que tu fasses un titre avec une phrase ; je veux du contenu de qualité.
     10. Mets les mots clés importants en gras dans le texte et humanise-le pour qu'il ne soit pas identifié comme généré par une IA.
+    11. Je veux qu'il y ait au moins 5 H2 minimum. Si je ne te les ai pas fournis, je veux que tu les inventes, mais qu'ils restent cohérents. Et je veux des H3 (2, 3 ou 4) pour chaque H2, sauf pour la conclusion et la FAQ.
     
     Fournis le contenu au format Markdown, en utilisant correctement les niveaux de titres (# pour H1, ## pour H2, ### pour H3).`;
 
@@ -225,50 +232,37 @@ app.get('/article/:id', authenticateToken, async (req, res) => {
   }
 });
 
-app.get('/stripe-payment-links', authenticateToken, async (req, res) => {
+app.post('/create-checkout-session', authenticateToken, async (req, res) => {
+  const { plan } = req.body;
+  let priceId;
+
+  switch (plan) {
+    case 'basic':
+      priceId = process.env.STRIPE_PRICE_ID_BASIC;
+      break;
+    case 'pro':
+      priceId = process.env.STRIPE_PRICE_ID_PRO;
+      break;
+    case 'enterprise':
+      priceId = process.env.STRIPE_PRICE_ID_ENTERPRISE;
+      break;
+    default:
+      return res.status(400).json({ error: 'Invalid plan' });
+  }
+
   try {
-    const user = await User.findById(req.user._id);
-
-    if (!user.stripeCustomerId) {
-      const customer = await stripe.customers.create({
-        email: user.email,
-      });
-      user.stripeCustomerId = customer.id;
-      await user.save();
-    }
-
-    const basicSession = await stripe.checkout.sessions.create({
+    const session = await stripe.checkout.sessions.create({
       payment_method_types: ['card'],
-      line_items: [{ price: process.env.STRIPE_PRICE_ID_BASIC, quantity: 1 }],
+      line_items: [{ price: priceId, quantity: 1 }],
       mode: 'subscription',
-      customer: user.stripeCustomerId,
-      client_reference_id: user._id.toString(),
+      success_url: `${process.env.EXTENSION_URL}?session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${process.env.EXTENSION_URL}`,
+      client_reference_id: req.user._id.toString(),
     });
 
-    const proSession = await stripe.checkout.sessions.create({
-      payment_method_types: ['card'],
-      line_items: [{ price: process.env.STRIPE_PRICE_ID_PRO, quantity: 1 }],
-      mode: 'subscription',
-      customer: user.stripeCustomerId,
-      client_reference_id: user._id.toString(),
-    });
-
-    const enterpriseSession = await stripe.checkout.sessions.create({
-      payment_method_types: ['card'],
-      line_items: [{ price: process.env.STRIPE_PRICE_ID_ENTERPRISE, quantity: 1 }],
-      mode: 'subscription',
-      customer: user.stripeCustomerId,
-      client_reference_id: user._id.toString(),
-    });
-
-    res.json({
-      basic: basicSession.url,
-      pro: proSession.url,
-      enterprise: enterpriseSession.url
-    });
+    res.json({ url: session.url });
   } catch (error) {
-    console.error('Error creating Stripe sessions:', error);
-    res.status(500).json({ error: 'Error creating Stripe sessions' });
+    res.status(500).json({ error: error.message });
   }
 });
 
@@ -300,7 +294,8 @@ app.post('/create-token-purchase', authenticateToken, async (req, res) => {
         },
       ],
       mode: 'payment',
-      customer: user.stripeCustomerId,
+      success_url: `${process.env.EXTENSION_URL}?session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${process.env.EXTENSION_URL}`,
       client_reference_id: user._id.toString(),
     });
 
