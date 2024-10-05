@@ -57,7 +57,6 @@ const scrapeSEOElements = async (url) => {
   const page = await browser.newPage();
   await page.goto(url);
 
-  // Scrape H1, H2, H3, texte et titre de la page
   const h1 = await page.$eval('h1', el => el.innerText).catch(() => '');
   const h2s = await page.$$eval('h2', els => els.map(el => el.innerText)).catch(() => []);
   const h3s = await page.$$eval('h3', els => els.map(el => el.innerText)).catch(() => []);
@@ -138,7 +137,6 @@ app.post('/generate', authenticateToken, async (req, res) => {
 
     if (req.body.url) {
       url = req.body.url;
-      // Scraper les éléments SEO
       const scrapedData = await scrapeSEOElements(url);
       ({ h1, h2s, h3s, title } = scrapedData);
     } else if (req.body.manualInput) {
@@ -157,8 +155,6 @@ app.post('/generate', authenticateToken, async (req, res) => {
     H3s : ${h3s.join(', ')}
     
     Crée un article de blog optimisé pour le SEO qui :
-    Je ne veux pas que tu fasses un copier-coller. Je veux juste que tu t'inspires des titres pour en faire ta structure de texte. Ensuite, je veux que tu suives les règles suivantes pour rédiger le contenu :
-    
     1. Utilise ces éléments SEO de manière naturelle et pertinente.
     2. A un contenu unique, original et approfondi.
     3. Est structuré avec une introduction captivante, des sections pour chaque H2 (utilisées comme sous-titres), des sous-sections pour les H3, et une conclusion percutante.
@@ -186,7 +182,6 @@ app.post('/generate', authenticateToken, async (req, res) => {
 
     const generatedContent = response.data.content[0].text;
 
-    // Sauvegarder l'article généré dans la base de données
     const article = new Article({
       userId: user._id,
       title: title || 'Article généré',
@@ -230,7 +225,6 @@ app.get('/article/:id', authenticateToken, async (req, res) => {
   }
 });
 
-// Nouvelle route pour créer une session de paiement Stripe
 app.post('/create-checkout-session', authenticateToken, async (req, res) => {
   try {
     const { priceId } = req.body;
@@ -257,7 +251,25 @@ app.post('/create-checkout-session', authenticateToken, async (req, res) => {
   }
 });
 
-// Webhook pour gérer les événements Stripe
+app.post('/create-customer-portal-session', authenticateToken, async (req, res) => {
+  try {
+    const user = await User.findById(req.user._id);
+    
+    if (!user.stripeCustomerId) {
+      return res.status(400).json({ error: 'Aucun abonnement actif' });
+    }
+
+    const session = await stripe.billingPortal.sessions.create({
+      customer: user.stripeCustomerId,
+      return_url: `${process.env.FRONTEND_URL}/account`,
+    });
+
+    res.json({ url: session.url });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 app.post('/webhook', express.raw({type: 'application/json'}), async (req, res) => {
   const sig = req.headers['stripe-signature'];
   let event;
@@ -268,7 +280,6 @@ app.post('/webhook', express.raw({type: 'application/json'}), async (req, res) =
     return res.status(400).send(`Webhook Error: ${err.message}`);
   }
 
-  // Gérer l'événement
   switch (event.type) {
     case 'checkout.session.completed':
       const session = event.data.object;
@@ -278,7 +289,6 @@ app.post('/webhook', express.raw({type: 'application/json'}), async (req, res) =
       const subscription = event.data.object;
       await handleCancelledSubscription(subscription);
       break;
-    // ... gérer d'autres événements si nécessaire
   }
 
   res.json({received: true});
@@ -289,12 +299,14 @@ async function handleSuccessfulPayment(session) {
   const user = await User.findById(userId);
   if (!user) return;
 
-  // Mettre à jour l'abonnement de l'utilisateur
+  if (!user.stripeCustomerId) {
+    user.stripeCustomerId = session.customer;
+  }
+
   user.subscriptionStatus = 'active';
   user.subscriptionPlan = session.display_items[0].plan.nickname;
   user.subscriptionEndDate = new Date(session.current_period_end * 1000);
 
-  // Ajouter des jetons en fonction du plan
   switch (user.subscriptionPlan) {
     case 'Basic':
       user.tokens = 100;
@@ -306,8 +318,7 @@ async function handleSuccessfulPayment(session) {
       user.tokens = 500;
       break;
     default:
-      // Gérer l'achat de jetons supplémentaires
-      const tokensToAdd = Math.floor(session.amount_total / 20); // 20 centimes par jeton
+      const tokensToAdd = Math.floor(session.amount_total / 20);
       user.tokens += tokensToAdd;
   }
 
@@ -324,7 +335,6 @@ async function handleCancelledSubscription(subscription) {
   await user.save();
 }
 
-// Gestion des erreurs
 app.use((err, req, res, next) => {
   console.error(err.stack);
   res.status(500).send('Something broke!');
