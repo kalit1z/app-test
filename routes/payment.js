@@ -54,8 +54,6 @@ router.post('/create-subscription', async (req, res) => {
       payment_method_types: ['card'],
       line_items: [{ price: priceId, quantity: 1 }],
       mode: 'subscription',
-      success_url: `${process.env.FRONTEND_URL}/success?session_id={CHECKOUT_SESSION_ID}`,
-      cancel_url: `${process.env.FRONTEND_URL}/cancel`,
       client_reference_id: userId,
     });
 
@@ -78,8 +76,6 @@ router.post('/buy-tokens', async (req, res) => {
       payment_method_types: ['card'],
       line_items: [{ price: priceId, quantity: quantity }],
       mode: 'payment',
-      success_url: `${process.env.FRONTEND_URL}/success?session_id={CHECKOUT_SESSION_ID}`,
-      cancel_url: `${process.env.FRONTEND_URL}/cancel`,
       client_reference_id: userId,
     });
 
@@ -171,13 +167,13 @@ async function handleSubscriptionRenewal(subscription) {
   if (user) {
     let tokensToAdd;
     switch (user.stripePlanId) {
-      case 'price_id_for_2990_plan':
+      case process.env.STRIPE_PRICE_ID_BASIC:
         tokensToAdd = 100;
         break;
-      case 'price_id_for_5990_plan':
+      case process.env.STRIPE_PRICE_ID_PRO:
         tokensToAdd = 250;
         break;
-      case 'price_id_for_9990_plan':
+      case process.env.STRIPE_PRICE_ID_ENTERPRISE:
         tokensToAdd = 500;
         break;
       default:
