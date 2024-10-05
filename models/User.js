@@ -3,32 +3,32 @@ const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 
 const userSchema = new mongoose.Schema({
-  email: { 
-    type: String, 
-    required: true, 
-    unique: true 
+  email: {
+    type: String,
+    required: true,
+    unique: true
   },
-  password: { 
-    type: String, 
-    required: true 
+  password: {
+    type: String,
+    required: true
   },
-  tokens: { 
-    type: Number, 
-    default: 0 
+  tokens: {
+    type: Number,
+    default: 5 // 5 tokens gratuits à l'inscription
   },
-  stripeCustomerId: { 
-    type: String 
+  stripeCustomerId: {
+    type: String
   },
-  subscriptionStatus: { 
-    type: String, 
-    enum: ['active', 'inactive', 'cancelled'], 
-    default: 'inactive' 
+  subscriptionStatus: {
+    type: String,
+    enum: ['active', 'inactive', 'cancelled'],
+    default: 'inactive'
   },
-  subscriptionPlan: { 
-    type: String 
+  subscriptionPlan: {
+    type: String
   },
-  subscriptionEndDate: { 
-    type: Date 
+  subscriptionEndDate: {
+    type: Date
   }
 }, { timestamps: true });
 

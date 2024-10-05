@@ -7,6 +7,7 @@ const jwt = require('jsonwebtoken');
 const { body, validationResult } = require('express-validator');
 const axios = require('axios');
 const puppeteer = require('puppeteer');
+const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 
 // Import des modèles
 const User = require('./models/User');
@@ -79,7 +80,7 @@ app.post('/register',
 
     try {
       const { email, password } = req.body;
-      const user = new User({ email, password });
+      const user = new User({ email, password, tokens: 5 }); // 5 tokens gratuits à l'inscription
       await user.save();
       res.status(201).json({ message: 'User registered successfully' });
     } catch (error) {
@@ -93,7 +94,7 @@ app.post('/login', async (req, res) => {
     const user = await User.findOne({ email });
     if (user && await user.comparePassword(password)) {
       const token = user.generateAuthToken();
-      res.json({ token });
+      res.json({ token, tokens: user.tokens });
     } else {
       res.status(400).json({ error: 'Invalid credentials' });
     }
@@ -114,8 +115,8 @@ app.get('/user', authenticateToken, async (req, res) => {
 app.post('/generate', authenticateToken, async (req, res) => {
   try {
     const user = await User.findById(req.user._id);
-    if (user.credits <= 0) {
-      return res.status(403).json({ error: 'Insufficient credits' });
+    if (user.tokens <= 0) {
+      return res.status(403).json({ error: 'Insufficient tokens' });
     }
 
     let h1, h2s, h3s, title, url;
@@ -141,8 +142,6 @@ app.post('/generate', authenticateToken, async (req, res) => {
     H3s : ${h3s.join(', ')}
     
     Crée un article de blog optimisé pour le SEO qui :
-    Je ne veux pas que tu fasses un copier-coller. Je veux juste que tu t'inspires des titres pour en faire ta structure de texte. Ensuite, je veux que tu suives les règles suivantes pour rédiger le contenu :
-    
     1. Utilise ces éléments SEO de manière naturelle et pertinente.
     2. A un contenu unique, original et approfondi.
     3. Est structuré avec une introduction captivante, des sections pour chaque H2 (utilisées comme sous-titres), des sous-sections pour les H3, et une conclusion percutante.
@@ -152,11 +151,13 @@ app.post('/generate', authenticateToken, async (req, res) => {
     7. Utilise au maximum 3 listes à puces si nécessaire, un tableau, et une citation marquante et vérifiable au maximum et je veux une faq a chaque fois.
     8. Adopte un ton professionnel mais accessible, adapté à votre audience cible.
     9. Fait en sorte d'avoir du texte en quantité pour chaque paragraphe. Je n'ai pas envie que tu fasses un titre avec une phrase ; je veux du contenu de qualité.
+    10. Mets les mots clés importants en gras dans le texte et humanise-le pour qu'il ne soit pas identifié comme généré par une IA.
+    11. Je veux qu'il y ait au moins 5 H2 minimum. Si je ne te les ai pas fournis, je veux que tu les inventes, mais qu'ils restent cohérents et surtout je veux du vrai contenu au moin 3 ligne de text au minimum pour chaque sous titre le but est de faire un contenu seo qualitatif et de faire a peu pret 1500 mots. Et je veux obligatoirement des H3 (2, 3 ou 4) pour chaque H2, sauf pour la conclusion et la FAQ.
     
     Fournis le contenu au format Markdown, en utilisant correctement les niveaux de titres (# pour H1, ## pour H2, ### pour H3).`;
 
     const response = await axios.post('https://api.anthropic.com/v1/messages', {
-      model: "claude-3-5-sonnet-20240620",
+      model: "claude-3-haiku-20240307",
       max_tokens: 4000,
       messages: [{ role: "user", content: prompt }]
     }, {
@@ -178,10 +179,10 @@ app.post('/generate', authenticateToken, async (req, res) => {
     });
     await article.save();
 
-    user.credits -= 1;
+    user.tokens -= 1;
     await user.save();
 
-    res.json({ content: generatedContent, filename: `${title || 'contenu_seo'}.md` });
+    res.json({ content: generatedContent, filename: `${title || 'contenu_seo'}.md`, tokens: user.tokens });
   } catch (error) {
     console.error('Error generating SEO content:', error);
     res.status(500).json({ error: 'Error generating SEO content' });
@@ -211,6 +212,219 @@ app.get('/article/:id', authenticateToken, async (req, res) => {
     console.error('Error fetching article:', error);
     res.status(500).json({ error: 'Error fetching article' });
   }
+});
+
+app.post('/change-password', authenticateToken, async (req, res) => {
+  try {
+    const { currentPassword, newPassword } = req.body;
+    const user = await User.findById(req.user._id);
+
+    if (!(await user.comparePassword(currentPassword))) {
+      return res.status(400).json({ error: 'Current password is incorrect' });
+    }
+
+    user.password = newPassword;
+    await user.save();
+
+    res.json({ message: 'Password changed successfully' });
+  } catch (error) {
+    res.status(500).json({ error: 'Error changing password' });
+  }
+});
+
+// Nouvelles routes pour la gestion des abonnements
+
+app.post('/create-subscription', authenticateToken, async (req, res) => {
+  try {
+    const user = await User.findById(req.user._id);
+    const { priceId } = req.body;
+
+    // Créer un client Stripe s'il n'existe pas déjà
+    if (!user.stripeCustomerId) {
+      const customer = await stripe.customers.create({
+        email: user.email,
+      });
+      user.stripeCustomerId = customer.id;
+      await user.save();
+    }
+
+    // Créer l'abonnement
+    const subscription = await stripe.subscriptions.create({
+      customer: user.stripeCustomerId,
+      items: [{ price: priceId }],
+      payment_behavior: 'default_incomplete',
+      expand: ['latest_invoice.payment_intent'],
+    });
+
+    user.subscriptionId = subscription.id;
+    user.subscriptionStatus = subscription.status;
+    await user.save();
+
+    res.json({
+      subscriptionId: subscription.id,
+      clientSecret: subscription.latest_invoice.payment_intent.client_secret,
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/cancel-subscription', authenticateToken, async (req, res) => {
+  try {
+    const user = await User.findById(req.user._id);
+
+    if (!user.subscriptionId) {
+      return res.status(400).json({ error: 'No active subscription' });
+    }
+
+    const subscription = await stripe.subscriptions.del(user.subscriptionId);
+
+    user.subscriptionId = null;
+    user.subscriptionStatus = 'canceled';
+    await user.save();
+
+    res.json({ message: 'Subscription canceled successfully' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/upgrade-subscription', authenticateToken, async (req, res) => {
+  try {
+    const user = await User.findById(req.user._id);
+    const { newPriceId } = req.body;
+
+    if (!user.subscriptionId) {
+      return res.status(400).json({ error: 'No active subscription to upgrade' });
+    }
+
+    const subscription = await stripe.subscriptions.retrieve(user.subscriptionId);
+    
+    await stripe.subscriptions.update(user.subscriptionId, {
+      items: [{
+        id: subscription.items.data[0].id,
+        price: newPriceId,
+      }],
+    });
+
+    res.json({ message: 'Subscription upgraded successfully' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/buy-tokens', authenticateToken, async (req, res) => {
+  try {
+    const user = await User.findById(req.user._id);
+    const { quantity } = req.body;
+
+    if (quantity < 25) {
+      return res.status(400).json({ error: 'Minimum token purchase is 25' });
+    }
+
+    const amount = quantity * 20; // 20 centimes par token
+
+    const paymentIntent = await stripe.paymentIntents.create({
+      amount: amount,
+      currency: 'eur',
+      customer: user.stripeCustomerId,
+      metadata: { tokens: quantity },
+    });
+
+    res.json({ clientSecret: paymentIntent.client_secret });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get('/subscription-status', authenticateToken, async (req, res) => {
+  try {
+    const user = await User.findById(req.user._id);
+    
+    if (!user.subscriptionId) {
+      return res.json({ status: 'No active subscription' });
+    }
+
+    const subscription = await stripe.subscriptions.retrieve(user.subscriptionId);
+    res.json({
+      status: subscription.status,
+      currentPeriodEnd: new Date(subscription.current_period_end * 1000),
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/stripe-webhook', express.raw({type: 'application/json'}), async (req, res) => {
+  const sig = req.headers['stripe-signature'];
+
+  let event;
+
+  try {
+    event = stripe.webhooks.constructEvent(req.body, sig, process.env.STRIPE_WEBHOOK_SECRET);
+  } catch (err) {
+    return res.status(400).send(`Webhook Error: ${err.message}`);
+  }
+
+  // Handle the event
+  switch (event.type) {
+    case 'payment_intent.succeeded':
+      const paymentIntent = event.data.object;
+      if (paymentIntent.metadata.tokens) {
+        const user = await User.findOne({ stripeCustomerId: paymentIntent.customer });
+        if (user) {
+          user.tokens += parseInt(paymentIntent.metadata.tokens);
+          await user.save();
+          console.log(`Added ${paymentIntent.metadata.tokens} tokens to user ${user.email}`);
+        }
+      }
+      break;
+    case 'invoice.paid':
+      const invoice = event.data.object;
+      const subscriptionId = invoice.subscription;
+      const user = await User.findOne({ subscriptionId: subscriptionId });
+      if (user) {
+        user.subscriptionStatus = 'active';
+        // Ajouter les tokens en fonction du type d'abonnement
+        if (invoice.lines.data[0].plan.amount === 2990) { // 29.90€ plan
+          user.tokens += 100;
+        } else if (invoice.lines.data[0].plan.amount === 9900) { // 99€ plan
+          user.tokens += 500;
+        } else if (invoice.lines.data[0].plan.amount === 99700) { // 997€ annual plan
+          user.tokens += 10000;
+        }
+        await user.save();
+        console.log(`Updated subscription status for user ${user.email} to active`);
+      }
+      break;
+    case 'invoice.payment_failed':
+      const failedInvoice = event.data.object;
+      const failedSubscriptionId = failedInvoice.subscription;
+      const failedUser = await User.findOne({ subscriptionId: failedSubscriptionId });
+      if (failedUser) {
+        failedUser.subscriptionStatus = 'past_due';
+        await failedUser.save();
+        console.log(`Updated subscription status for user ${failedUser.email} to past_due`);
+      }
+      break;
+    case 'customer.subscription.deleted':
+      const deletedSubscription = event.data.object;
+      const deletedUser = await User.findOne({ subscriptionId: deletedSubscription.id });
+      if (deletedUser) {
+        deletedUser.subscriptionId = null;
+        deletedUser.subscriptionStatus = 'canceled';
+        await deletedUser.save();
+        console.log(`Subscription canceled for user ${deletedUser.email}`);
+      }
+      break;
+    // ... vous pouvez ajouter d'autres cas selon vos besoins
+
+    default:
+      console.log(`Unhandled event type ${event.type}`);
+  }
+
+  // Return a response to acknowledge receipt of the event
+  res.json({received: true});
 });
 
 // Gestion des erreurs
