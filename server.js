@@ -230,6 +230,14 @@ app.post('/create-checkout-session', authenticateToken, async (req, res) => {
     const { priceId } = req.body;
     const user = await User.findById(req.user._id);
 
+    if (!user.stripeCustomerId) {
+      const customer = await stripe.customers.create({
+        email: user.email,
+      });
+      user.stripeCustomerId = customer.id;
+      await user.save();
+    }
+
     const session = await stripe.checkout.sessions.create({
       payment_method_types: ['card'],
       line_items: [
@@ -239,10 +247,9 @@ app.post('/create-checkout-session', authenticateToken, async (req, res) => {
         },
       ],
       mode: 'subscription',
-      success_url: `${process.env.FRONTEND_URL}/success?session_id={CHECKOUT_SESSION_ID}`,
-      cancel_url: `${process.env.FRONTEND_URL}/cancel`,
-      customer_email: user.email,
-      client_reference_id: user._id.toString(),
+      success_url: `${process.env.EXTENSION_SUCCESS_URL}?session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${process.env.EXTENSION_CANCEL_URL}`,
+      customer: user.stripeCustomerId,
     });
 
     res.json({ sessionId: session.id });
@@ -251,20 +258,53 @@ app.post('/create-checkout-session', authenticateToken, async (req, res) => {
   }
 });
 
-app.post('/create-customer-portal-session', authenticateToken, async (req, res) => {
+app.post('/create-token-purchase', authenticateToken, async (req, res) => {
   try {
     const user = await User.findById(req.user._id);
-    
+    const { amount } = req.body;
+
     if (!user.stripeCustomerId) {
-      return res.status(400).json({ error: 'Aucun abonnement actif' });
+      const customer = await stripe.customers.create({
+        email: user.email,
+      });
+      user.stripeCustomerId = customer.id;
+      await user.save();
     }
 
-    const session = await stripe.billingPortal.sessions.create({
+    const session = await stripe.checkout.sessions.create({
+      payment_method_types: ['card'],
+      line_items: [
+        {
+          price_data: {
+            currency: 'eur',
+            product_data: {
+              name: 'Jetons SEO',
+            },
+            unit_amount: 20, // 20 centimes par jeton
+          },
+          quantity: amount,
+        },
+      ],
+      mode: 'payment',
+      success_url: `${process.env.EXTENSION_SUCCESS_URL}?session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${process.env.EXTENSION_CANCEL_URL}`,
       customer: user.stripeCustomerId,
-      return_url: `${process.env.FRONTEND_URL}/account`,
     });
 
-    res.json({ url: session.url });
+    res.json({ sessionId: session.id });
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
+app.get('/subscription-plans', async (req, res) => {
+  try {
+    const plans = [
+      { id: process.env.STRIPE_PRICE_ID_BASIC, name: 'Basic', tokens: 100, price: 2990 },
+      { id: process.env.STRIPE_PRICE_ID_PRO, name: 'Pro', tokens: 250, price: 5990 },
+      { id: process.env.STRIPE_PRICE_ID_ENTERPRISE, name: 'Enterprise', tokens: 500, price: 9990 },
+    ];
+    res.json(plans);
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -283,45 +323,54 @@ app.post('/webhook', express.raw({type: 'application/json'}), async (req, res) =
   switch (event.type) {
     case 'checkout.session.completed':
       const session = event.data.object;
-      await handleSuccessfulPayment(session);
+      if (session.mode === 'subscription') {
+        await handleSubscriptionPurchase(session);
+      } else if (session.mode === 'payment') {
+        await handleTokenPurchase(session);
+      }
       break;
     case 'customer.subscription.deleted':
-      const subscription = event.data.object;
-      await handleCancelledSubscription(subscription);
+      await handleCancelledSubscription(event.data.object);
       break;
   }
 
   res.json({received: true});
 });
 
-async function handleSuccessfulPayment(session) {
+async function handleSubscriptionPurchase(session) {
   const userId = session.client_reference_id;
-  const user = await User.findById(userId);
+  const user = await User.findOne({ stripeCustomerId: session.customer });
   if (!user) return;
 
-  if (!user.stripeCustomerId) {
-    user.stripeCustomerId = session.customer;
-  }
+  const subscription = await stripe.subscriptions.retrieve(session.subscription);
+  const plan = subscription.items.data[0].price;
 
   user.subscriptionStatus = 'active';
-  user.subscriptionPlan = session.display_items[0].plan.nickname;
-  user.subscriptionEndDate = new Date(session.current_period_end * 1000);
+  user.subscriptionPlan = plan.nickname;
+  user.subscriptionEndDate = new Date(subscription.current_period_end * 1000);
 
-  switch (user.subscriptionPlan) {
-    case 'Basic':
+  // Attribution des jetons en fonction du plan
+  switch (plan.id) {
+    case process.env.STRIPE_PRICE_ID_BASIC:
       user.tokens = 100;
       break;
-    case 'Pro':
+    case process.env.STRIPE_PRICE_ID_PRO:
       user.tokens = 250;
       break;
-    case 'Enterprise':
+    case process.env.STRIPE_PRICE_ID_ENTERPRISE:
       user.tokens = 500;
       break;
-    default:
-      const tokensToAdd = Math.floor(session.amount_total / 20);
-      user.tokens += tokensToAdd;
   }
 
+  await user.save();
+}
+
+async function handleTokenPurchase(session) {
+  const user = await User.findOne({ stripeCustomerId: session.customer });
+  if (!user) return;
+
+  const tokensToAdd = Math.floor(session.amount_total / 20); // 20 centimes par jeton
+  user.tokens += tokensToAdd;
   await user.save();
 }
 
