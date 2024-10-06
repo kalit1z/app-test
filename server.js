@@ -18,7 +18,11 @@ mongoose.set('strictQuery', false);
 
 const app = express();
 
-// Middleware
+// Middleware pour les webhooks Stripe et PayPal
+app.use('/stripe-webhook', express.raw({type: 'application/json'}));
+app.use('/paypal-webhook', express.raw({type: 'application/json'}));
+
+// Middleware général
 app.use(cors());
 app.use(express.json());
 
@@ -301,15 +305,14 @@ app.get('/subscription-status', authenticateToken, async (req, res) => {
   }
 });
 
-app.post('/stripe-webhook', express.raw({type: 'application/json'}), async (req, res) => {
+app.post('/stripe-webhook', async (req, res) => {
   const sig = req.headers['stripe-signature'];
-
   let event;
 
   try {
     event = stripe.webhooks.constructEvent(req.body, sig, process.env.STRIPE_WEBHOOK_SECRET);
   } catch (err) {
-    console.error('Erreur de signature du webhook:', err.message);
+    console.error('Erreur de signature du webhook Stripe:', err.message);
     return res.status(400).send(`Webhook Error: ${err.message}`);
   }
 
@@ -336,12 +339,39 @@ app.post('/stripe-webhook', express.raw({type: 'application/json'}), async (req,
         console.log(`Unhandled event type ${event.type}`);
     }
   } catch (error) {
-    console.error('Erreur lors du traitement de l\'événement:', error);
+    console.error('Erreur lors du traitement de l\'événement Stripe:', error);
     return res.status(500).send(`Error processing event: ${error.message}`);
   }
 
   // Return a response to acknowledge receipt of the event
   res.json({received: true});
+});
+
+app.post('/paypal-webhook', async (req, res) => {
+  // Vérification de la signature PayPal (à implémenter selon la documentation PayPal)
+  
+  try {
+    const event = req.body;
+    
+    switch (event.event_type) {
+      case 'PAYMENT.CAPTURE.COMPLETED':
+        await handlePayPalPaymentCompleted(event);
+        break;
+      case 'BILLING.SUBSCRIPTION.ACTIVATED':
+        await handlePayPalSubscriptionActivated(event);
+        break;
+      case 'BILLING.SUBSCRIPTION.CANCELLED':
+        await handlePayPalSubscriptionCancelled(event);
+        break;
+      default:
+        console.log(`Unhandled PayPal event type ${event.event_type}`);
+    }
+    
+    res.status(200).json({received: true});
+  } catch (error) {
+    console.error('Erreur lors du traitement de l\'événement PayPal:', error);
+    res.status(500).send(`Error processing PayPal event: ${error.message}`);
+  }
 });
 
 async function handleCheckoutSessionCompleted(session) {
@@ -413,6 +443,48 @@ async function handleSubscriptionDeleted(subscription) {
 
   await user.updateSubscription('canceled', null, null);
   console.log(`Abonnement annulé pour l'utilisateur ${user.email}`);
+}
+
+async function handlePayPalPaymentCompleted(event) {
+  // Implémentez la logique pour traiter un paiement PayPal complété
+  // Par exemple, ajoutez des tokens à l'utilisateur
+  const customId = event.resource.custom_id; // Assurez-vous que ceci correspond à l'ID de l'utilisateur
+  const user = await User.findById(customId);
+  if (!user) {
+    console.error(`Utilisateur non trouvé pour l'ID PayPal: ${customId}`);
+    return;
+  }
+
+  const tokenQuantity = parseInt(event.resource.amount.value) * 5; // Exemple: 1 euro = 5 tokens
+  await user.addTokens(tokenQuantity);
+  console.log(`${tokenQuantity} tokens ajoutés pour l'utilisateur ${user.email} via PayPal`);
+}
+
+async function handlePayPalSubscriptionActivated(event) {
+  // Implémentez la logique pour traiter une activation d'abonnement PayPal
+  const subscriptionId = event.resource.id;
+  const user = await User.findOne({ paypalSubscriptionId: subscriptionId });
+  if (!user) {
+    console.error(`Utilisateur non trouvé pour l'abonnement PayPal: ${subscriptionId}`);
+    return;
+  }
+
+  const plan = event.resource.plan_id; // Assurez-vous que ceci correspond à votre système de plans
+  await user.updateSubscription('active', plan, new Date(event.resource.billing_info.next_billing_time));
+  console.log(`Abonnement PayPal ${plan} activé pour l'utilisateur ${user.email}`);
+}
+
+async function handlePayPalSubscriptionCancelled(event) {
+  // Implémentez la logique pour traiter une annulation d'abonnement PayPal
+  const subscriptionId = event.resource.id;
+  const user = await User.findOne({ paypalSubscriptionId: subscriptionId });
+  if (!user) {
+    console.error(`Utilisateur non trouvé pour l'abonnement PayPal: ${subscriptionId}`);
+    return;
+  }
+
+  await user.updateSubscription('canceled', null, null);
+  console.log(`Abonnement PayPal annulé pour l'utilisateur ${user.email}`);
 }
 
 // Gestion des erreurs
