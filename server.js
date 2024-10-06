@@ -250,7 +250,7 @@ app.post('/create-payment-session', authenticateToken, async (req, res) => {
       payment_method_types: ['card'],
       client_reference_id: user._id.toString(),
       customer_email: user.email,
-      success_url: 'https://checkout.stripe.com/success?session_id={CHECKOUT_SESSION_ID}',
+      success_url: 'https://checkout.stripe.com/success',
       cancel_url: 'https://checkout.stripe.com/cancel',
     };
 
