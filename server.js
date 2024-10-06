@@ -255,6 +255,8 @@ app.post('/create-payment-session', authenticateToken, async (req, res) => {
       payment_method_types: ['card'],
       client_reference_id: user._id.toString(),
       customer_email: user.email,
+      success_url: 'https://example.com/success', // URL générique à intercepter
+      cancel_url: 'https://example.com/cancel',   // URL générique à intercepter
     };
 
     if (type === 'token') {
