@@ -246,6 +246,9 @@ app.post('/create-payment-session', authenticateToken, async (req, res) => {
     const user = await User.findById(req.user._id);
     const { type, quantity, plan } = req.body;
 
+    const success_url = 'https://example.com/success?session_id={CHECKOUT_SESSION_ID}';
+    const cancel_url = 'https://example.com/cancel';
+
     let session;
     if (type === 'token') {
       session = await stripe.checkout.sessions.create({
@@ -261,6 +264,8 @@ app.post('/create-payment-session', authenticateToken, async (req, res) => {
           quantity: quantity,
         }],
         mode: 'payment',
+        success_url: success_url,
+        cancel_url: cancel_url,
         client_reference_id: user._id.toString(),
         customer_email: user.email,
         metadata: {
@@ -281,6 +286,8 @@ app.post('/create-payment-session', authenticateToken, async (req, res) => {
           quantity: 1,
         }],
         mode: 'subscription',
+        success_url: success_url,
+        cancel_url: cancel_url,
         client_reference_id: user._id.toString(),
         customer_email: user.email,
         metadata: {
@@ -423,23 +430,6 @@ async function handleSubscriptionDeleted(subscription) {
   await user.updateSubscription('canceled', null, null);
   console.log(`Abonnement annulé pour l'utilisateur ${user.email}`);
 }
-
-// Assurez-vous que ces méthodes existent dans votre modèle User
-// Si ce n'est pas le cas, ajoutez-les à votre modèle User :
-
-/*
-userSchema.methods.addTokens = async function(amount) {
-  this.tokens += amount;
-  await this.save();
-};
-
-userSchema.methods.updateSubscription = async function(status, plan, endDate) {
-  this.subscriptionStatus = status;
-  this.subscriptionPlan = plan;
-  this.subscriptionEndDate = endDate;
-  await this.save();
-};
-*/
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
