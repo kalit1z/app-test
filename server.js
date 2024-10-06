@@ -6,7 +6,7 @@ const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const { body, validationResult } = require('express-validator');
 const axios = require('axios');
-const puppeteer = require('puppeteer');
+const cheerio = require('cheerio');
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 
 // Import des modèles
@@ -51,21 +51,23 @@ const authenticateToken = (req, res, next) => {
   });
 };
 
-// Fonction de scraping
+// Fonction de scraping avec Axios et Cheerio
 const scrapeSEOElements = async (url) => {
-  const browser = await puppeteer.launch();
-  const page = await browser.newPage();
-  await page.goto(url);
+  try {
+    const response = await axios.get(url);
+    const $ = cheerio.load(response.data);
 
-  // Scrape H1, H2, H3, texte et titre de la page
-  const h1 = await page.$eval('h1', el => el.innerText).catch(() => '');
-  const h2s = await page.$$eval('h2', els => els.map(el => el.innerText)).catch(() => []);
-  const h3s = await page.$$eval('h3', els => els.map(el => el.innerText)).catch(() => []);
-  const text = await page.evaluate(() => document.body.innerText);
-  const title = await page.title();
+    const h1 = $('h1').first().text().trim();
+    const h2s = $('h2').map((_, el) => $(el).text().trim()).get();
+    const h3s = $('h3').map((_, el) => $(el).text().trim()).get();
+    const text = $('body').text().trim();
+    const title = $('title').text().trim();
 
-  await browser.close();
-  return { h1, h2s, h3s, text, title };
+    return { h1, h2s, h3s, text, title };
+  } catch (error) {
+    console.error('Error scraping website:', error);
+    throw new Error('Failed to scrape website');
+  }
 };
 
 // Routes
@@ -386,15 +388,15 @@ app.post('/stripe-webhook', express.raw({type: 'application/json'}), async (req,
       if (user) {
         user.subscriptionStatus = 'active';
         // Ajouter les tokens en fonction du type d'abonnement
-        if (invoice.lines.data[0].plan.amount === 2990) { // 29.90€ plan
+        if (invoice.lines.data[0].price.id === process.env.STRIPE_PRICE_MONTHLY_100) {
           user.tokens += 100;
-        } else if (invoice.lines.data[0].plan.amount === 9900) { // 99€ plan
+        } else if (invoice.lines.data[0].price.id === process.env.STRIPE_PRICE_MONTHLY_500) {
           user.tokens += 500;
-        } else if (invoice.lines.data[0].plan.amount === 99700) { // 997€ annual plan
+        } else if (invoice.lines.data[0].price.id === process.env.STRIPE_PRICE_YEARLY_10000) {
           user.tokens += 10000;
         }
         await user.save();
-        console.log(`Updated subscription status for user ${user.email} to active`);
+        console.log(`Updated subscription status for user ${user.email} to active and added tokens`);
       }
       break;
     case 'invoice.payment_failed':
