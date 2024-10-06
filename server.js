@@ -322,11 +322,13 @@ app.get('/get-stripe-key', (req, res) => {
 });
 
 app.post('/stripe-webhook', async (req, res) => {
+  console.log('Webhook Stripe reçu');
   const sig = req.headers['stripe-signature'];
   let event;
 
   try {
     event = stripe.webhooks.constructEvent(req.body, sig, process.env.STRIPE_WEBHOOK_SECRET);
+    console.log('Événement Stripe validé:', event.type);
   } catch (err) {
     console.error('Erreur de signature du webhook Stripe:', err.message);
     return res.status(400).send(`Webhook Error: ${err.message}`);
