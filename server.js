@@ -246,6 +246,9 @@ app.post('/create-payment-session', authenticateToken, async (req, res) => {
     const user = await User.findById(req.user._id);
     const { type, quantity, plan } = req.body;
 
+    const success_url = 'https://example.com/success?session_id={CHECKOUT_SESSION_ID}';
+    const cancel_url = 'https://example.com/cancel';
+
     let session;
     if (type === 'token') {
       session = await stripe.checkout.sessions.create({
@@ -261,6 +264,8 @@ app.post('/create-payment-session', authenticateToken, async (req, res) => {
           quantity: quantity,
         }],
         mode: 'payment',
+        success_url: success_url,
+        cancel_url: cancel_url,
         client_reference_id: user._id.toString(),
         customer_email: user.email,
         metadata: {
@@ -281,6 +286,8 @@ app.post('/create-payment-session', authenticateToken, async (req, res) => {
           quantity: 1,
         }],
         mode: 'subscription',
+        success_url: success_url,
+        cancel_url: cancel_url,
         client_reference_id: user._id.toString(),
         customer_email: user.email,
         metadata: {
