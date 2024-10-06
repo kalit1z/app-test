@@ -246,12 +246,9 @@ app.post('/create-payment-session', authenticateToken, async (req, res) => {
     const user = await User.findById(req.user._id);
     const { type, quantity, plan } = req.body;
 
-    const success_url = 'https://example.com/success?session_id={CHECKOUT_SESSION_ID}';
-    const cancel_url = 'https://example.com/cancel';
-
-    let session;
+    let sessionConfig;
     if (type === 'token') {
-      session = await stripe.checkout.sessions.create({
+      sessionConfig = {
         payment_method_types: ['card'],
         line_items: [{
           price_data: {
@@ -264,14 +261,7 @@ app.post('/create-payment-session', authenticateToken, async (req, res) => {
           quantity: quantity,
         }],
         mode: 'payment',
-        success_url: success_url,
-        cancel_url: cancel_url,
-        client_reference_id: user._id.toString(),
-        customer_email: user.email,
-        metadata: {
-          tokens: quantity.toString(),
-        },
-      });
+      };
     } else if (type === 'subscription') {
       const planDetails = {
         basic: { price: process.env.STRIPE_PRICE_MONTHLY_100, name: 'Basic Plan' },
@@ -279,24 +269,23 @@ app.post('/create-payment-session', authenticateToken, async (req, res) => {
         enterprise: { price: process.env.STRIPE_PRICE_YEARLY_10000, name: 'Enterprise Plan' }
       };
 
-      session = await stripe.checkout.sessions.create({
+      sessionConfig = {
         payment_method_types: ['card'],
         line_items: [{
           price: planDetails[plan].price,
           quantity: 1,
         }],
         mode: 'subscription',
-        success_url: success_url,
-        cancel_url: cancel_url,
-        client_reference_id: user._id.toString(),
-        customer_email: user.email,
-        metadata: {
-          plan: plan
-        },
-      });
+      };
     } else {
       return res.status(400).json({ error: 'Invalid session type' });
     }
+
+    // Ajoutez ces propriétés communes
+    sessionConfig.client_reference_id = user._id.toString();
+    sessionConfig.customer_email = user.email;
+
+    const session = await stripe.checkout.sessions.create(sessionConfig);
 
     res.json({ sessionId: session.id });
   } catch (error) {
