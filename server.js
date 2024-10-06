@@ -272,6 +272,7 @@ app.post('/create-payment-session', authenticateToken, async (req, res) => {
         metadata: {
           type: 'token',
           quantity: quantity.toString(),
+          userId: user._id.toString(),
         },
       };
     } else if (type === 'subscription') {
@@ -291,6 +292,7 @@ app.post('/create-payment-session', authenticateToken, async (req, res) => {
         metadata: {
           type: 'subscription',
           plan: plan,
+          userId: user._id.toString(),
         },
       };
     } else {
