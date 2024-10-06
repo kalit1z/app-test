@@ -155,6 +155,7 @@ app.post('/generate', authenticateToken, async (req, res) => {
     9. Fait en sorte d'avoir du texte en quantité pour chaque paragraphe. Je n'ai pas envie que tu fasses un titre avec une phrase ; je veux du contenu de qualité.
     10. Mets les mots clés importants en gras dans le texte et humanise-le pour qu'il ne soit pas identifié comme généré par une IA.
     11. Je veux qu'il y ait au moins 5 H2 minimum. Si je ne te les ai pas fournis, je veux que tu les inventes, mais qu'ils restent cohérents et surtout je veux du vrai contenu au moin 3 ligne de text au minimum pour chaque sous titre le but est de faire un contenu seo qualitatif et de faire a peu pret 1500 mots. Et je veux obligatoirement des H3 (2, 3 ou 4) pour chaque H2, sauf pour la conclusion et la FAQ.
+    12. Rend moi le contenu genérer sans aucun autre commentaire de ta part
     
     Fournis le contenu au format Markdown, en utilisant correctement les niveaux de titres (# pour H1, ## pour H2, ### pour H3).`;
 
@@ -239,7 +240,22 @@ app.post('/change-password', authenticateToken, async (req, res) => {
 app.post('/create-subscription', authenticateToken, async (req, res) => {
   try {
     const user = await User.findById(req.user._id);
-    const { priceId } = req.body;
+    const { plan } = req.body;
+
+    let priceId;
+    switch(plan) {
+      case 'basic':
+        priceId = process.env.STRIPE_PRICE_MONTHLY_100;
+        break;
+      case 'pro':
+        priceId = process.env.STRIPE_PRICE_MONTHLY_500;
+        break;
+      case 'enterprise':
+        priceId = process.env.STRIPE_PRICE_YEARLY_10000;
+        break;
+      default:
+        return res.status(400).json({ error: 'Invalid plan selected' });
+    }
 
     // Créer un client Stripe s'il n'existe pas déjà
     if (!user.stripeCustomerId) {
@@ -250,22 +266,20 @@ app.post('/create-subscription', authenticateToken, async (req, res) => {
       await user.save();
     }
 
-    // Créer l'abonnement
-    const subscription = await stripe.subscriptions.create({
+    // Créer la session de paiement
+    const session = await stripe.checkout.sessions.create({
       customer: user.stripeCustomerId,
-      items: [{ price: priceId }],
-      payment_behavior: 'default_incomplete',
-      expand: ['latest_invoice.payment_intent'],
+      payment_method_types: ['card'],
+      line_items: [{
+        price: priceId,
+        quantity: 1,
+      }],
+      mode: 'subscription',
+      success_url: `${process.env.FRONTEND_URL}/success?session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${process.env.FRONTEND_URL}/cancel`,
     });
 
-    user.subscriptionId = subscription.id;
-    user.subscriptionStatus = subscription.status;
-    await user.save();
-
-    res.json({
-      subscriptionId: subscription.id,
-      clientSecret: subscription.latest_invoice.payment_intent.client_secret,
-    });
+    res.json({ url: session.url });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -279,13 +293,12 @@ app.post('/cancel-subscription', authenticateToken, async (req, res) => {
       return res.status(400).json({ error: 'No active subscription' });
     }
 
-    const subscription = await stripe.subscriptions.del(user.subscriptionId);
+    const subscription = await stripe.subscriptions.update(user.subscriptionId, { cancel_at_period_end: true });
 
-    user.subscriptionId = null;
-    user.subscriptionStatus = 'canceled';
+    user.subscriptionStatus = 'cancelling';
     await user.save();
 
-    res.json({ message: 'Subscription canceled successfully' });
+    res.json({ message: 'Subscription will be canceled at the end of the billing period' });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -294,10 +307,22 @@ app.post('/cancel-subscription', authenticateToken, async (req, res) => {
 app.post('/upgrade-subscription', authenticateToken, async (req, res) => {
   try {
     const user = await User.findById(req.user._id);
-    const { newPriceId } = req.body;
+    const { newPlan } = req.body;
 
     if (!user.subscriptionId) {
       return res.status(400).json({ error: 'No active subscription to upgrade' });
+    }
+
+    let newPriceId;
+    switch(newPlan) {
+      case 'pro':
+        newPriceId = process.env.STRIPE_PRICE_MONTHLY_500;
+        break;
+      case 'enterprise':
+        newPriceId = process.env.STRIPE_PRICE_YEARLY_10000;
+        break;
+      default:
+        return res.status(400).json({ error: 'Invalid plan selected for upgrade' });
     }
 
     const subscription = await stripe.subscriptions.retrieve(user.subscriptionId);
@@ -308,6 +333,9 @@ app.post('/upgrade-subscription', authenticateToken, async (req, res) => {
         price: newPriceId,
       }],
     });
+
+    user.subscriptionPlan = newPlan;
+    await user.save();
 
     res.json({ message: 'Subscription upgraded successfully' });
   } catch (error) {
@@ -326,14 +354,28 @@ app.post('/buy-tokens', authenticateToken, async (req, res) => {
 
     const amount = quantity * 20; // 20 centimes par token
 
-    const paymentIntent = await stripe.paymentIntents.create({
-      amount: amount,
-      currency: 'eur',
-      customer: user.stripeCustomerId,
-      metadata: { tokens: quantity },
+    const session = await stripe.checkout.sessions.create({
+      payment_method_types: ['card'],
+      line_items: [{
+        price_data: {
+          currency: 'eur',
+          product_data: {
+            name: 'Tokens',
+          },
+          unit_amount: 20,
+        },
+        quantity: quantity,
+      }],
+      mode: 'payment',
+      success_url: `${process.env.FRONTEND_URL}/success?session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${process.env.FRONTEND_URL}/cancel`,
+      client_reference_id: user._id.toString(),
+      metadata: {
+        tokens: quantity.toString(),
+      },
     });
 
-    res.json({ clientSecret: paymentIntent.client_secret });
+    res.json({ url: session.url });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -344,12 +386,13 @@ app.get('/subscription-status', authenticateToken, async (req, res) => {
     const user = await User.findById(req.user._id);
     
     if (!user.subscriptionId) {
-      return res.json({ status: 'No active subscription' });
+      return res.json({ status: 'No active subscription', plan: null });
     }
 
     const subscription = await stripe.subscriptions.retrieve(user.subscriptionId);
     res.json({
       status: subscription.status,
+      plan: user.subscriptionPlan,
       currentPeriodEnd: new Date(subscription.current_period_end * 1000),
     });
   } catch (error) {
@@ -370,14 +413,26 @@ app.post('/stripe-webhook', express.raw({type: 'application/json'}), async (req,
 
   // Handle the event
   switch (event.type) {
-    case 'payment_intent.succeeded':
-      const paymentIntent = event.data.object;
-      if (paymentIntent.metadata.tokens) {
-        const user = await User.findOne({ stripeCustomerId: paymentIntent.customer });
+    case 'checkout.session.completed':
+      const session = event.data.object;
+      if (session.mode === 'payment') {
+        // Token purchase
+        const userId = session.client_reference_id;
+        const tokenQuantity = parseInt(session.metadata.tokens);
+        const user = await User.findById(userId);
         if (user) {
-          user.tokens += parseInt(paymentIntent.metadata.tokens);
+          user.tokens += tokenQuantity;
           await user.save();
-          console.log(`Added ${paymentIntent.metadata.tokens} tokens to user ${user.email}`);
+          console.log(`Added ${tokenQuantity} tokens to user ${user.email}`);
+        }
+      } else if (session.mode === 'subscription') {
+        // Subscription started
+        const user = await User.findOne({ stripeCustomerId: session.customer });
+        if (user) {
+          user.subscriptionId = session.subscription;
+          user.subscriptionStatus = 'active';
+          await user.save();
+          console.log(`Activated subscription for user ${user.email}`);
         }
       }
       break;
@@ -390,10 +445,13 @@ app.post('/stripe-webhook', express.raw({type: 'application/json'}), async (req,
         // Ajouter les tokens en fonction du type d'abonnement
         if (invoice.lines.data[0].price.id === process.env.STRIPE_PRICE_MONTHLY_100) {
           user.tokens += 100;
+          user.subscriptionPlan = 'basic';
         } else if (invoice.lines.data[0].price.id === process.env.STRIPE_PRICE_MONTHLY_500) {
           user.tokens += 500;
+          user.subscriptionPlan = 'pro';
         } else if (invoice.lines.data[0].price.id === process.env.STRIPE_PRICE_YEARLY_10000) {
           user.tokens += 10000;
+          user.subscriptionPlan = 'enterprise';
         }
         await user.save();
         console.log(`Updated subscription status for user ${user.email} to active and added tokens`);
@@ -415,12 +473,11 @@ app.post('/stripe-webhook', express.raw({type: 'application/json'}), async (req,
       if (deletedUser) {
         deletedUser.subscriptionId = null;
         deletedUser.subscriptionStatus = 'canceled';
+        deletedUser.subscriptionPlan = null;
         await deletedUser.save();
         console.log(`Subscription canceled for user ${deletedUser.email}`);
       }
       break;
-    // ... vous pouvez ajouter d'autres cas selon vos besoins
-
     default:
       console.log(`Unhandled event type ${event.type}`);
   }
