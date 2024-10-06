@@ -53,10 +53,7 @@ const authenticateToken = (req, res, next) => {
 
 // Fonction de scraping
 const scrapeSEOElements = async (url) => {
-  const browser = await puppeteer.launch({
-    args: ['--no-sandbox', '--disable-setuid-sandbox'],
-    headless: 'new'
-  });
+  const browser = await puppeteer.launch();
   const page = await browser.newPage();
   await page.goto(url);
 
