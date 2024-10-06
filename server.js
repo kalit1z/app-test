@@ -243,7 +243,12 @@ app.post('/change-password', authenticateToken, async (req, res) => {
 
 app.post('/create-payment-session', authenticateToken, async (req, res) => {
   try {
+    console.log('Received request to create payment session:', req.body);
     const user = await User.findById(req.user._id);
+    if (!user) {
+      throw new Error('User not found');
+    }
+
     const { type, quantity, plan } = req.body;
 
     let sessionConfig = {
@@ -253,6 +258,9 @@ app.post('/create-payment-session', authenticateToken, async (req, res) => {
     };
 
     if (type === 'token') {
+      if (!quantity || quantity < 1) {
+        throw new Error('Invalid token quantity');
+      }
       sessionConfig = {
         ...sessionConfig,
         line_items: [{
@@ -274,11 +282,18 @@ app.post('/create-payment-session', authenticateToken, async (req, res) => {
         },
       };
     } else if (type === 'subscription') {
+      if (!plan) {
+        throw new Error('Invalid subscription plan');
+      }
       const planDetails = {
         basic: { price: process.env.STRIPE_PRICE_MONTHLY_100, name: 'Basic Plan' },
         pro: { price: process.env.STRIPE_PRICE_MONTHLY_500, name: 'Pro Plan' },
         enterprise: { price: process.env.STRIPE_PRICE_YEARLY_10000, name: 'Enterprise Plan' }
       };
+
+      if (!planDetails[plan]) {
+        throw new Error('Invalid subscription plan');
+      }
 
       sessionConfig = {
         ...sessionConfig,
@@ -294,15 +309,16 @@ app.post('/create-payment-session', authenticateToken, async (req, res) => {
         },
       };
     } else {
-      return res.status(400).json({ error: 'Invalid session type' });
+      throw new Error('Invalid session type');
     }
 
+    console.log('Creating Stripe session with config:', sessionConfig);
     const session = await stripe.checkout.sessions.create(sessionConfig);
     console.log('Stripe session created:', session.id);
     res.json({ sessionId: session.id });
   } catch (error) {
     console.error('Error creating payment session:', error);
-    res.status(500).json({ error: 'Error creating payment session' });
+    res.status(500).json({ error: error.message });
   }
 });
 
