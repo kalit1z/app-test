@@ -255,8 +255,8 @@ app.post('/create-payment-session', authenticateToken, async (req, res) => {
       payment_method_types: ['card'],
       client_reference_id: user._id.toString(),
       customer_email: user.email,
-      success_url: 'https://example.com/success', // URL générique à intercepter
-      cancel_url: 'https://example.com/cancel',   // URL générique à intercepter
+      success_url: `${process.env.SERVER_URL}/checkout?session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${process.env.SERVER_URL}/checkout?session_id={CHECKOUT_SESSION_ID}`,
     };
 
     if (type === 'token') {
@@ -380,6 +380,24 @@ app.post('/stripe-webhook', express.raw({type: 'application/json'}), async (req,
   }
 
   res.json({received: true});
+});
+
+app.get('/checkout', async (req, res) => {
+  const { session_id } = req.query;
+  
+  if (!session_id) {
+    return res.status(400).send('Session ID is required');
+  }
+
+  try {
+    const session = await stripe.checkout.sessions.retrieve(session_id);
+    
+    // Redirigez vers l'URL de paiement Stripe
+    res.redirect(303, session.url);
+  } catch (error) {
+    console.error('Error retrieving checkout session:', error);
+    res.status(500).send('Error processing checkout');
+  }
 });
 
 async function handleCheckoutSessionCompleted(session) {
