@@ -18,9 +18,8 @@ mongoose.set('strictQuery', false);
 
 const app = express();
 
-// Middleware pour les webhooks Stripe et PayPal
+// Middleware pour les webhooks Stripe
 app.use('/stripe-webhook', express.raw({type: 'application/json'}));
-app.use('/paypal-webhook', express.raw({type: 'application/json'}));
 
 // Middleware général
 app.use(cors());
@@ -86,7 +85,7 @@ app.post('/register',
 
     try {
       const { email, password } = req.body;
-      const user = new User({ email, password, tokens: 5 }); // 5 tokens gratuits à l'inscription
+      const user = new User({ email, password, tokens: 5 });
       await user.save();
       res.status(201).json({ message: 'User registered successfully' });
     } catch (error) {
@@ -129,7 +128,6 @@ app.post('/generate', authenticateToken, async (req, res) => {
 
     if (req.body.url) {
       url = req.body.url;
-      // Scraper les éléments SEO
       const scrapedData = await scrapeSEOElements(url);
       ({ h1, h2s, h3s, title } = scrapedData);
     } else if (req.body.manualInput) {
@@ -177,7 +175,6 @@ app.post('/generate', authenticateToken, async (req, res) => {
 
     const generatedContent = response.data.content[0].text;
 
-    // Sauvegarder l'article généré dans la base de données
     const article = new Article({
       userId: user._id,
       title: title || 'Article généré',
@@ -239,24 +236,38 @@ app.post('/change-password', authenticateToken, async (req, res) => {
   }
 });
 
-app.post('/register-subscription-intent', authenticateToken, async (req, res) => {
+app.post('/create-subscription-session', authenticateToken, async (req, res) => {
   try {
-    const { plan } = req.body;
     const user = await User.findById(req.user._id);
-    
-    user.subscriptionIntent = {
-      plan: plan,
-      timestamp: new Date()
+    const { plan } = req.body;
+
+    const planDetails = {
+      basic: { price: 'price_id_for_basic', name: 'Basic Plan' },
+      pro: { price: 'price_id_for_pro', name: 'Pro Plan' },
+      enterprise: { price: 'price_id_for_enterprise', name: 'Enterprise Plan' }
     };
-    await user.save();
-    
-    res.json({ message: 'Intention abonnement enregistrée' });
+
+    const session = await stripe.checkout.sessions.create({
+      payment_method_types: ['card'],
+      line_items: [{
+        price: planDetails[plan].price,
+        quantity: 1,
+      }],
+      mode: 'subscription',
+      client_reference_id: user._id.toString(),
+      customer_email: user.email,
+      metadata: {
+        plan: plan
+      },
+    });
+
+    res.json({ sessionId: session.id });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });
 
-app.post('/buy-tokens', authenticateToken, async (req, res) => {
+app.post('/create-token-purchase-session', authenticateToken, async (req, res) => {
   try {
     const user = await User.findById(req.user._id);
     const { quantity } = req.body;
@@ -264,8 +275,6 @@ app.post('/buy-tokens', authenticateToken, async (req, res) => {
     if (quantity < 25) {
       return res.status(400).json({ error: 'Minimum token purchase is 25' });
     }
-
-    const amount = quantity * 20; // 20 centimes par token
 
     const session = await stripe.checkout.sessions.create({
       payment_method_types: ['card'],
@@ -275,12 +284,13 @@ app.post('/buy-tokens', authenticateToken, async (req, res) => {
           product_data: {
             name: 'Tokens',
           },
-          unit_amount: 20,
+          unit_amount: 20, // 20 centimes par token
         },
         quantity: quantity,
       }],
       mode: 'payment',
       client_reference_id: user._id.toString(),
+      customer_email: user.email,
       metadata: {
         tokens: quantity.toString(),
       },
@@ -316,7 +326,6 @@ app.post('/stripe-webhook', async (req, res) => {
     return res.status(400).send(`Webhook Error: ${err.message}`);
   }
 
-  // Handle the event
   try {
     switch (event.type) {
       case 'checkout.session.completed':
@@ -343,35 +352,7 @@ app.post('/stripe-webhook', async (req, res) => {
     return res.status(500).send(`Error processing event: ${error.message}`);
   }
 
-  // Return a response to acknowledge receipt of the event
   res.json({received: true});
-});
-
-app.post('/paypal-webhook', async (req, res) => {
-  // Vérification de la signature PayPal (à implémenter selon la documentation PayPal)
-  
-  try {
-    const event = req.body;
-    
-    switch (event.event_type) {
-      case 'PAYMENT.CAPTURE.COMPLETED':
-        await handlePayPalPaymentCompleted(event);
-        break;
-      case 'BILLING.SUBSCRIPTION.ACTIVATED':
-        await handlePayPalSubscriptionActivated(event);
-        break;
-      case 'BILLING.SUBSCRIPTION.CANCELLED':
-        await handlePayPalSubscriptionCancelled(event);
-        break;
-      default:
-        console.log(`Unhandled PayPal event type ${event.event_type}`);
-    }
-    
-    res.status(200).json({received: true});
-  } catch (error) {
-    console.error('Erreur lors du traitement de l\'événement PayPal:', error);
-    res.status(500).send(`Error processing PayPal event: ${error.message}`);
-  }
 });
 
 async function handleCheckoutSessionCompleted(session) {
@@ -383,12 +364,10 @@ async function handleCheckoutSessionCompleted(session) {
   }
 
   if (session.mode === 'payment') {
-    // Achat de tokens
     const tokenQuantity = parseInt(session.metadata.tokens);
     await user.addTokens(tokenQuantity);
     console.log(`${tokenQuantity} tokens ajoutés pour l'utilisateur ${user.email}`);
   } else if (session.mode === 'subscription') {
-    // Abonnement démarré
     const plan = session.metadata.plan;
     await user.updateSubscription('active', plan, new Date(session.current_period_end * 1000));
     console.log(`Abonnement ${plan} activé pour l'utilisateur ${user.email}`);
@@ -406,7 +385,6 @@ async function handleInvoicePaid(invoice) {
   const plan = invoice.lines.data[0].plan.nickname;
   await user.updateSubscription('active', plan, new Date(invoice.lines.data[0].period.end * 1000));
   
-  // Ajoutez des tokens en fonction du plan
   let tokensToAdd = 0;
   switch (plan) {
     case 'basic':
@@ -444,54 +422,6 @@ async function handleSubscriptionDeleted(subscription) {
   await user.updateSubscription('canceled', null, null);
   console.log(`Abonnement annulé pour l'utilisateur ${user.email}`);
 }
-
-async function handlePayPalPaymentCompleted(event) {
-  // Implémentez la logique pour traiter un paiement PayPal complété
-  // Par exemple, ajoutez des tokens à l'utilisateur
-  const customId = event.resource.custom_id; // Assurez-vous que ceci correspond à l'ID de l'utilisateur
-  const user = await User.findById(customId);
-  if (!user) {
-    console.error(`Utilisateur non trouvé pour l'ID PayPal: ${customId}`);
-    return;
-  }
-
-  const tokenQuantity = parseInt(event.resource.amount.value) * 5; // Exemple: 1 euro = 5 tokens
-  await user.addTokens(tokenQuantity);
-  console.log(`${tokenQuantity} tokens ajoutés pour l'utilisateur ${user.email} via PayPal`);
-}
-
-async function handlePayPalSubscriptionActivated(event) {
-  // Implémentez la logique pour traiter une activation d'abonnement PayPal
-  const subscriptionId = event.resource.id;
-  const user = await User.findOne({ paypalSubscriptionId: subscriptionId });
-  if (!user) {
-    console.error(`Utilisateur non trouvé pour l'abonnement PayPal: ${subscriptionId}`);
-    return;
-  }
-
-  const plan = event.resource.plan_id; // Assurez-vous que ceci correspond à votre système de plans
-  await user.updateSubscription('active', plan, new Date(event.resource.billing_info.next_billing_time));
-  console.log(`Abonnement PayPal ${plan} activé pour l'utilisateur ${user.email}`);
-}
-
-async function handlePayPalSubscriptionCancelled(event) {
-  // Implémentez la logique pour traiter une annulation d'abonnement PayPal
-  const subscriptionId = event.resource.id;
-  const user = await User.findOne({ paypalSubscriptionId: subscriptionId });
-  if (!user) {
-    console.error(`Utilisateur non trouvé pour l'abonnement PayPal: ${subscriptionId}`);
-    return;
-  }
-
-  await user.updateSubscription('canceled', null, null);
-  console.log(`Abonnement PayPal annulé pour l'utilisateur ${user.email}`);
-}
-
-// Gestion des erreurs
-app.use((err, req, res, next) => {
-  console.error(err.stack);
-  res.status(500).send('Something broke!');
-});
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
