@@ -246,21 +246,33 @@ app.post('/create-payment-session', authenticateToken, async (req, res) => {
     const user = await User.findById(req.user._id);
     const { type, quantity, plan } = req.body;
 
-    let sessionConfig;
+    let sessionConfig = {
+      payment_method_types: ['card'],
+      client_reference_id: user._id.toString(),
+      customer_email: user.email,
+      success_url: 'https://checkout.stripe.com/success?session_id={CHECKOUT_SESSION_ID}',
+      cancel_url: 'https://checkout.stripe.com/cancel',
+    };
+
     if (type === 'token') {
       sessionConfig = {
-        payment_method_types: ['card'],
+        ...sessionConfig,
         line_items: [{
           price_data: {
             currency: 'eur',
             product_data: {
               name: 'Tokens',
+              description: `${quantity} tokens for SEO Content Generator`,
             },
             unit_amount: process.env.TOKEN_PRICE,
           },
           quantity: quantity,
         }],
         mode: 'payment',
+        metadata: {
+          type: 'token',
+          quantity: quantity.toString(),
+        },
       };
     } else if (type === 'subscription') {
       const planDetails = {
@@ -270,20 +282,20 @@ app.post('/create-payment-session', authenticateToken, async (req, res) => {
       };
 
       sessionConfig = {
-        payment_method_types: ['card'],
+        ...sessionConfig,
         line_items: [{
           price: planDetails[plan].price,
           quantity: 1,
         }],
         mode: 'subscription',
+        metadata: {
+          type: 'subscription',
+          plan: plan,
+        },
       };
     } else {
       return res.status(400).json({ error: 'Invalid session type' });
     }
-
-    // Ajoutez ces propriétés communes
-    sessionConfig.client_reference_id = user._id.toString();
-    sessionConfig.customer_email = user.email;
 
     const session = await stripe.checkout.sessions.create(sessionConfig);
 
