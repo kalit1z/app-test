@@ -18,10 +18,7 @@ mongoose.set('strictQuery', false);
 
 const app = express();
 
-// Middleware pour les webhooks Stripe
-app.use('/stripe-webhook', express.raw({type: 'application/json'}));
-
-// Middleware général
+// Middleware
 app.use(cors());
 app.use(express.json());
 
@@ -45,10 +42,10 @@ connectDB();
 const authenticateToken = (req, res, next) => {
   const authHeader = req.headers['authorization'];
   const token = authHeader && authHeader.split(' ')[1];
-  if (token == null) return res.sendStatus(401);
+  if (token == null) return res.status(401).json({ error: 'Authentication token required' });
 
   jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
-    if (err) return res.sendStatus(403);
+    if (err) return res.status(403).json({ error: 'Invalid or expired token' });
     req.user = user;
     next();
   });
@@ -85,11 +82,16 @@ app.post('/register',
 
     try {
       const { email, password } = req.body;
-      const user = new User({ email, password, tokens: 5 }); // 5 tokens gratuits à l'inscription
+      const existingUser = await User.findOne({ email });
+      if (existingUser) {
+        return res.status(400).json({ error: 'User already exists' });
+      }
+      const user = new User({ email, password, tokens: 5 });
       await user.save();
       res.status(201).json({ message: 'User registered successfully' });
     } catch (error) {
-      res.status(500).json({ error: error.message });
+      console.error('Registration error:', error);
+      res.status(500).json({ error: 'Error registering user' });
     }
 });
 
@@ -104,7 +106,8 @@ app.post('/login', async (req, res) => {
       res.status(400).json({ error: 'Invalid credentials' });
     }
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    console.error('Login error:', error);
+    res.status(500).json({ error: 'Error during login' });
   }
 });
 
@@ -113,7 +116,8 @@ app.get('/user', authenticateToken, async (req, res) => {
     const user = await User.findById(req.user._id).select('-password');
     res.json(user);
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    console.error('Error fetching user:', error);
+    res.status(500).json({ error: 'Error fetching user data' });
   }
 });
 
@@ -128,7 +132,6 @@ app.post('/generate', authenticateToken, async (req, res) => {
 
     if (req.body.url) {
       url = req.body.url;
-      // Scraper les éléments SEO
       const scrapedData = await scrapeSEOElements(url);
       ({ h1, h2s, h3s, title } = scrapedData);
     } else if (req.body.manualInput) {
@@ -176,7 +179,6 @@ app.post('/generate', authenticateToken, async (req, res) => {
 
     const generatedContent = response.data.content[0].text;
 
-    // Sauvegarder l'article généré dans la base de données
     const article = new Article({
       userId: user._id,
       title: title || 'Article généré',
@@ -234,73 +236,65 @@ app.post('/change-password', authenticateToken, async (req, res) => {
 
     res.json({ message: 'Password changed successfully' });
   } catch (error) {
+    console.error('Error changing password:', error);
     res.status(500).json({ error: 'Error changing password' });
   }
 });
 
-app.post('/create-subscription-session', authenticateToken, async (req, res) => {
+app.post('/create-payment-session', authenticateToken, async (req, res) => {
   try {
     const user = await User.findById(req.user._id);
-    const { plan } = req.body;
+    const { type, quantity, plan } = req.body;
 
-    const planDetails = {
-      basic: { price: process.env.STRIPE_PRICE_MONTHLY_100, name: 'Basic Plan' },
-      pro: { price: process.env.STRIPE_PRICE_MONTHLY_500, name: 'Pro Plan' },
-      enterprise: { price: process.env.STRIPE_PRICE_YEARLY_10000, name: 'Enterprise Plan' }
-    };
+    let session;
+    if (type === 'token') {
+      session = await stripe.checkout.sessions.create({
+        payment_method_types: ['card'],
+        line_items: [{
+          price_data: {
+            currency: 'eur',
+            product_data: {
+              name: 'Tokens',
+            },
+            unit_amount: process.env.TOKEN_PRICE,
+          },
+          quantity: quantity,
+        }],
+        mode: 'payment',
+        client_reference_id: user._id.toString(),
+        customer_email: user.email,
+        metadata: {
+          tokens: quantity.toString(),
+        },
+      });
+    } else if (type === 'subscription') {
+      const planDetails = {
+        basic: { price: process.env.STRIPE_PRICE_MONTHLY_100, name: 'Basic Plan' },
+        pro: { price: process.env.STRIPE_PRICE_MONTHLY_500, name: 'Pro Plan' },
+        enterprise: { price: process.env.STRIPE_PRICE_YEARLY_10000, name: 'Enterprise Plan' }
+      };
 
-    const session = await stripe.checkout.sessions.create({
-      payment_method_types: ['card'],
-      line_items: [{
-        price: planDetails[plan].price,
-        quantity: 1,
-      }],
-      mode: 'subscription',
-      client_reference_id: user._id.toString(),
-      customer_email: user.email,
-      metadata: {
-        plan: plan
-      },
-    });
-
-    res.json({ sessionId: session.id });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-app.post('/create-token-purchase-session', authenticateToken, async (req, res) => {
-  try {
-    const user = await User.findById(req.user._id);
-    const { quantity } = req.body;
-
-    if (quantity < 25) {
-      return res.status(400).json({ error: 'Minimum token purchase is 25' });
+      session = await stripe.checkout.sessions.create({
+        payment_method_types: ['card'],
+        line_items: [{
+          price: planDetails[plan].price,
+          quantity: 1,
+        }],
+        mode: 'subscription',
+        client_reference_id: user._id.toString(),
+        customer_email: user.email,
+        metadata: {
+          plan: plan
+        },
+      });
+    } else {
+      return res.status(400).json({ error: 'Invalid session type' });
     }
 
-    const session = await stripe.checkout.sessions.create({
-      payment_method_types: ['card'],
-      line_items: [{
-        price_data: {
-          currency: 'eur',
-          product_data: {
-            name: 'Tokens',
-          },
-          unit_amount: process.env.TOKEN_PRICE,
-        },
-        quantity: quantity,
-      }],
-      mode: 'payment',
-      client_reference_id: user._id.toString(),
-      customer_email: user.email,
-      metadata: {
-        tokens: quantity.toString(),
-      },
-    });
-
     res.json({ sessionId: session.id });
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    console.error('Error creating payment session:', error);
+    res.status(500).json({ error: 'Error creating payment session' });
   }
 });
 
@@ -313,7 +307,8 @@ app.get('/subscription-status', authenticateToken, async (req, res) => {
       endDate: user.subscriptionEndDate
     });
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    console.error('Error fetching subscription status:', error);
+    res.status(500).json({ error: 'Error fetching subscription status' });
   }
 });
 
@@ -321,17 +316,15 @@ app.get('/get-stripe-key', (req, res) => {
   res.json({ publishableKey: process.env.STRIPE_PUBLISHABLE_KEY });
 });
 
-app.post('/stripe-webhook', async (req, res) => {
-  console.log('Webhook Stripe reçu');
+app.post('/stripe-webhook', express.raw({type: 'application/json'}), async (req, res) => {
   const sig = req.headers['stripe-signature'];
   let event;
 
   try {
     event = stripe.webhooks.constructEvent(req.body, sig, process.env.STRIPE_WEBHOOK_SECRET);
-    console.log('Événement Stripe validé:', event.type);
   } catch (err) {
     console.error('Erreur de signature du webhook Stripe:', err.message);
-    return res.status(400).send(`Webhook Error: ${err.message}`);
+    return res.status(400).json({ error: `Webhook Error: ${err.message}` });
   }
 
   try {
@@ -357,7 +350,7 @@ app.post('/stripe-webhook', async (req, res) => {
     }
   } catch (error) {
     console.error('Erreur lors du traitement de l\'événement Stripe:', error);
-    return res.status(500).send(`Error processing event: ${error.message}`);
+    return res.status(500).json({ error: `Error processing event: ${error.message}` });
   }
 
   res.json({received: true});
@@ -430,6 +423,23 @@ async function handleSubscriptionDeleted(subscription) {
   await user.updateSubscription('canceled', null, null);
   console.log(`Abonnement annulé pour l'utilisateur ${user.email}`);
 }
+
+// Assurez-vous que ces méthodes existent dans votre modèle User
+// Si ce n'est pas le cas, ajoutez-les à votre modèle User :
+
+/*
+userSchema.methods.addTokens = async function(amount) {
+  this.tokens += amount;
+  await this.save();
+};
+
+userSchema.methods.updateSubscription = async function(status, plan, endDate) {
+  this.subscriptionStatus = status;
+  this.subscriptionPlan = plan;
+  this.subscriptionEndDate = endDate;
+  await this.save();
+};
+*/
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
