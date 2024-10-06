@@ -85,7 +85,7 @@ app.post('/register',
 
     try {
       const { email, password } = req.body;
-      const user = new User({ email, password, tokens: 5 });
+      const user = new User({ email, password, tokens: 5 }); // 5 tokens gratuits à l'inscription
       await user.save();
       res.status(201).json({ message: 'User registered successfully' });
     } catch (error) {
@@ -128,6 +128,7 @@ app.post('/generate', authenticateToken, async (req, res) => {
 
     if (req.body.url) {
       url = req.body.url;
+      // Scraper les éléments SEO
       const scrapedData = await scrapeSEOElements(url);
       ({ h1, h2s, h3s, title } = scrapedData);
     } else if (req.body.manualInput) {
@@ -175,6 +176,7 @@ app.post('/generate', authenticateToken, async (req, res) => {
 
     const generatedContent = response.data.content[0].text;
 
+    // Sauvegarder l'article généré dans la base de données
     const article = new Article({
       userId: user._id,
       title: title || 'Article généré',
@@ -242,9 +244,9 @@ app.post('/create-subscription-session', authenticateToken, async (req, res) => 
     const { plan } = req.body;
 
     const planDetails = {
-      basic: { price: 'price_id_for_basic', name: 'Basic Plan' },
-      pro: { price: 'price_id_for_pro', name: 'Pro Plan' },
-      enterprise: { price: 'price_id_for_enterprise', name: 'Enterprise Plan' }
+      basic: { price: process.env.STRIPE_PRICE_MONTHLY_100, name: 'Basic Plan' },
+      pro: { price: process.env.STRIPE_PRICE_MONTHLY_500, name: 'Pro Plan' },
+      enterprise: { price: process.env.STRIPE_PRICE_YEARLY_10000, name: 'Enterprise Plan' }
     };
 
     const session = await stripe.checkout.sessions.create({
@@ -284,7 +286,7 @@ app.post('/create-token-purchase-session', authenticateToken, async (req, res) =
           product_data: {
             name: 'Tokens',
           },
-          unit_amount: 20, // 20 centimes par token
+          unit_amount: process.env.TOKEN_PRICE,
         },
         quantity: quantity,
       }],
@@ -313,6 +315,10 @@ app.get('/subscription-status', authenticateToken, async (req, res) => {
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
+});
+
+app.get('/get-stripe-key', (req, res) => {
+  res.json({ publishableKey: process.env.STRIPE_PUBLISHABLE_KEY });
 });
 
 app.post('/stripe-webhook', async (req, res) => {
