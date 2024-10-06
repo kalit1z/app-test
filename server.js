@@ -235,109 +235,18 @@ app.post('/change-password', authenticateToken, async (req, res) => {
   }
 });
 
-// Nouvelles routes pour la gestion des abonnements
-
-app.post('/create-subscription', authenticateToken, async (req, res) => {
+app.post('/register-subscription-intent', authenticateToken, async (req, res) => {
   try {
-    const user = await User.findById(req.user._id);
     const { plan } = req.body;
-
-    let priceId;
-    switch(plan) {
-      case 'basic':
-        priceId = process.env.STRIPE_PRICE_MONTHLY_100;
-        break;
-      case 'pro':
-        priceId = process.env.STRIPE_PRICE_MONTHLY_500;
-        break;
-      case 'enterprise':
-        priceId = process.env.STRIPE_PRICE_YEARLY_10000;
-        break;
-      default:
-        return res.status(400).json({ error: 'Invalid plan selected' });
-    }
-
-    // Créer un client Stripe s'il n'existe pas déjà
-    if (!user.stripeCustomerId) {
-      const customer = await stripe.customers.create({
-        email: user.email,
-      });
-      user.stripeCustomerId = customer.id;
-      await user.save();
-    }
-
-    // Créer la session de paiement
-    const session = await stripe.checkout.sessions.create({
-      customer: user.stripeCustomerId,
-      payment_method_types: ['card'],
-      line_items: [{
-        price: priceId,
-        quantity: 1,
-      }],
-      mode: 'subscription',
-      success_url: `${process.env.FRONTEND_URL}/success?session_id={CHECKOUT_SESSION_ID}`,
-      cancel_url: `${process.env.FRONTEND_URL}/cancel`,
-    });
-
-    res.json({ url: session.url });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-app.post('/cancel-subscription', authenticateToken, async (req, res) => {
-  try {
     const user = await User.findById(req.user._id);
-
-    if (!user.subscriptionId) {
-      return res.status(400).json({ error: 'No active subscription' });
-    }
-
-    const subscription = await stripe.subscriptions.update(user.subscriptionId, { cancel_at_period_end: true });
-
-    user.subscriptionStatus = 'cancelling';
-    await user.save();
-
-    res.json({ message: 'Subscription will be canceled at the end of the billing period' });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-app.post('/upgrade-subscription', authenticateToken, async (req, res) => {
-  try {
-    const user = await User.findById(req.user._id);
-    const { newPlan } = req.body;
-
-    if (!user.subscriptionId) {
-      return res.status(400).json({ error: 'No active subscription to upgrade' });
-    }
-
-    let newPriceId;
-    switch(newPlan) {
-      case 'pro':
-        newPriceId = process.env.STRIPE_PRICE_MONTHLY_500;
-        break;
-      case 'enterprise':
-        newPriceId = process.env.STRIPE_PRICE_YEARLY_10000;
-        break;
-      default:
-        return res.status(400).json({ error: 'Invalid plan selected for upgrade' });
-    }
-
-    const subscription = await stripe.subscriptions.retrieve(user.subscriptionId);
     
-    await stripe.subscriptions.update(user.subscriptionId, {
-      items: [{
-        id: subscription.items.data[0].id,
-        price: newPriceId,
-      }],
-    });
-
-    user.subscriptionPlan = newPlan;
+    user.subscriptionIntent = {
+      plan: plan,
+      timestamp: new Date()
+    };
     await user.save();
-
-    res.json({ message: 'Subscription upgraded successfully' });
+    
+    res.json({ message: 'Intention abonnement enregistrée' });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -384,16 +293,10 @@ app.post('/buy-tokens', authenticateToken, async (req, res) => {
 app.get('/subscription-status', authenticateToken, async (req, res) => {
   try {
     const user = await User.findById(req.user._id);
-    
-    if (!user.subscriptionId) {
-      return res.json({ status: 'No active subscription', plan: null });
-    }
-
-    const subscription = await stripe.subscriptions.retrieve(user.subscriptionId);
     res.json({
-      status: subscription.status,
       plan: user.subscriptionPlan,
-      currentPeriodEnd: new Date(subscription.current_period_end * 1000),
+      status: user.subscriptionStatus,
+      endDate: user.subscriptionEndDate
     });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -427,10 +330,13 @@ app.post('/stripe-webhook', express.raw({type: 'application/json'}), async (req,
         }
       } else if (session.mode === 'subscription') {
         // Subscription started
-        const user = await User.findOne({ stripeCustomerId: session.customer });
+        const user = await User.findOne({ email: session.customer_email });
         if (user) {
           user.subscriptionId = session.subscription;
           user.subscriptionStatus = 'active';
+          user.subscriptionPlan = user.subscriptionIntent.plan;
+          user.subscriptionEndDate = new Date(session.current_period_end * 1000);
+          user.subscriptionIntent = null;
           await user.save();
           console.log(`Activated subscription for user ${user.email}`);
         }
@@ -442,55 +348,58 @@ app.post('/stripe-webhook', express.raw({type: 'application/json'}), async (req,
       const user = await User.findOne({ subscriptionId: subscriptionId });
       if (user) {
         user.subscriptionStatus = 'active';
-        // Ajouter les tokens en fonction du type d'abonnement
-        if (invoice.lines.data[0].price.id === process.env.STRIPE_PRICE_MONTHLY_100) {
-          user.tokens += 100;
-          user.subscriptionPlan = 'basic';
-        } else if (invoice.lines.data[0].price.id === process.env.STRIPE_PRICE_MONTHLY_500) {
-          user.tokens += 500;
-          user.subscriptionPlan = 'pro';
-        } else if (invoice.lines.data[0].price.id === process.env.STRIPE_PRICE_YEARLY_10000) {
-          user.tokens += 10000;
-          user.subscriptionPlan = 'enterprise';
+        user.subscriptionEndDate = new Date(invoice.lines.data[0].period.end * 1000);
+        // Add tokens based on the subscription plan
+        switch (user.subscriptionPlan) {
+          case 'basic':
+            user.tokens += 100;
+            break;
+          case 'pro':
+            user.tokens += 500;
+            break;
+          case 'enterprise':
+            user.tokens += 10000;
+            break;
         }
         await user.save();
         console.log(`Updated subscription status for user ${user.email} to active and added tokens`);
       }
       break;
-    case 'invoice.payment_failed':
-      const failedInvoice = event.data.object;
-      const failedSubscriptionId = failedInvoice.subscription;
-      const failedUser = await User.findOne({ subscriptionId: failedSubscriptionId });
-      if (failedUser) {
-        failedUser.subscriptionStatus = 'past_due';
-        await failedUser.save();
-        console.log(`Updated subscription status for user ${failedUser.email} to past_due`);
-      }
-      break;
-    case 'customer.subscription.deleted':
-      const deletedSubscription = event.data.object;
-      const deletedUser = await User.findOne({ subscriptionId: deletedSubscription.id });
-      if (deletedUser) {
-        deletedUser.subscriptionId = null;
-        deletedUser.subscriptionStatus = 'canceled';
-        deletedUser.subscriptionPlan = null;
-        await deletedUser.save();
-        console.log(`Subscription canceled for user ${deletedUser.email}`);
-      }
-      break;
-    default:
-      console.log(`Unhandled event type ${event.type}`);
-  }
-
-  // Return a response to acknowledge receipt of the event
-  res.json({received: true});
-});
-
-// Gestion des erreurs
-app.use((err, req, res, next) => {
-  console.error(err.stack);
-  res.status(500).send('Something broke!');
-});
-
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+      case 'invoice.payment_failed':
+        const failedInvoice = event.data.object;
+        const failedSubscriptionId = failedInvoice.subscription;
+        const failedUser = await User.findOne({ subscriptionId: failedSubscriptionId });
+        if (failedUser) {
+          failedUser.subscriptionStatus = 'past_due';
+          await failedUser.save();
+          console.log(`Updated subscription status for user ${failedUser.email} to past_due`);
+        }
+        break;
+      case 'customer.subscription.deleted':
+        const deletedSubscription = event.data.object;
+        const deletedUser = await User.findOne({ subscriptionId: deletedSubscription.id });
+        if (deletedUser) {
+          deletedUser.subscriptionId = null;
+          deletedUser.subscriptionStatus = 'canceled';
+          deletedUser.subscriptionPlan = null;
+          deletedUser.subscriptionEndDate = null;
+          await deletedUser.save();
+          console.log(`Subscription canceled for user ${deletedUser.email}`);
+        }
+        break;
+      default:
+        console.log(`Unhandled event type ${event.type}`);
+    }
+  
+    // Return a response to acknowledge receipt of the event
+    res.json({received: true});
+  });
+  
+  // Gestion des erreurs
+  app.use((err, req, res, next) => {
+    console.error(err.stack);
+    res.status(500).send('Something broke!');
+  });
+  
+  const PORT = process.env.PORT || 3000;
+  app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
