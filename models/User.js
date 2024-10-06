@@ -21,7 +21,7 @@ const userSchema = new mongoose.Schema({
   },
   subscriptionStatus: {
     type: String,
-    enum: ['active', 'inactive', 'cancelled'],
+    enum: ['active', 'inactive', 'past_due', 'canceled'],
     default: 'inactive'
   },
   subscriptionPlan: {
@@ -29,6 +29,10 @@ const userSchema = new mongoose.Schema({
   },
   subscriptionEndDate: {
     type: Date
+  },
+  subscriptionIntent: {
+    plan: String,
+    timestamp: Date
   }
 }, { timestamps: true });
 
